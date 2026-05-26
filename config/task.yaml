@@ -1,0 +1,25 @@
+planning_task:
+  description: >
+    Analyze the following requirement: {user_request}. 
+    Create a detailed technical design including class structures, 
+    method signatures, and logic flow.
+  expected_output: >
+    A comprehensive technical design document in Markdown format.
+  agent: senior_architect
+
+coding_task:
+  description: >
+    Using the technical design provided, implement the full solution in {language}. 
+    Ensure the code is modular and includes necessary documentation.
+  expected_output: >
+    The complete source code file, ready for execution.
+  agent: senior_developer
+
+review_task:
+  description: >
+    Review the code for logical errors, security issues, and performance bottlenecks. 
+    If errors are found, provide the corrected version. 
+    Ensure all requirements from the original request are met.
+  expected_output: >
+    The final, polished version of the code and a brief summary of the checks performed.
+  agent: qa_engineer
