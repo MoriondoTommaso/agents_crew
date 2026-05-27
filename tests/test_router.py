@@ -11,7 +11,6 @@ Run with:
 """
 import sys
 import os
-import json
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -136,6 +135,8 @@ class TestKeywordFallback:
         assert result is r.api_llm
 
     def test_fallback_on_empty_response_returns_api_llm(self):
+        # Empty response → fallback → no local keywords in prompt → api
+        # Note: prompt must NOT contain local keywords (implement/write/code/etc.)
         api_llm   = MagicMock(spec=LLM)
         local_llm = MagicMock(spec=LLM)
         with patch("crew.LLM") as mock_llm_cls:
@@ -145,7 +146,7 @@ class TestKeywordFallback:
         r.local_llm = local_llm
         r._router_llm = MagicMock()
         r._router_llm.call.return_value = ""
-        result = r.route("review this code", task_key="unknown")
+        result = r.route("analyse security vulnerabilities", task_key="unknown")
         assert result is r.api_llm
 
     def test_fallback_coding_keywords_return_local(self):

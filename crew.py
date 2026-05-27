@@ -40,8 +40,8 @@ class SMLRouter:
         "review_task":   "api",
     }
 
-    # Keywords that signal LOCAL (coding) — must match as whole words
-    _LOCAL_KEYWORDS = {"implement", "write", "develop", "build", "generate", "create"}
+    # Keywords that signal LOCAL (coding) — matched as whole words
+    _LOCAL_KEYWORDS = {"implement", "write", "code", "develop", "build", "generate", "create"}
 
     def __init__(self, api_llm: LLM, local_llm: LLM):
         self.api_llm   = api_llm
@@ -69,7 +69,7 @@ class SMLRouter:
             return self._keyword_fallback(task_description)
 
     def _keyword_fallback(self, text: str) -> str:
-        """Word-boundary keyword match — avoids 'code' matching inside 'review this code'."""
+        """Word-boundary keyword match to avoid substring false positives."""
         words = set(text.lower().split())
         if words & self._LOCAL_KEYWORDS:
             return "local"
