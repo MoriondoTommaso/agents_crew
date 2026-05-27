@@ -1,0 +1,31 @@
+# docker-compose.yml
+# Runs the Hybrid Coding Agency server.
+# Ollama stays on the host — the container reaches it via host.docker.internal.
+#
+# Usage:
+#   docker compose up --build
+#   docker compose up -d          # detached
+#   docker compose logs -f        # follow logs
+
+services:
+  coding-agency:
+    build: .
+    image: coding-agency:latest
+    container_name: coding-agency
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override Ollama URL so the container reaches the host
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Needed on Linux (automatic on Docker Desktop for Mac/Windows)
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
