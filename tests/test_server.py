@@ -2,42 +2,45 @@
 Test suite for the FastAPI server endpoints.
 All tests mock CodingAgencyCrew completely — zero API calls, zero Ollama calls.
 
+Critical: CodingAgencyCrew is imported INSIDE the lifespan function in server.py:
+    from crew import CodingAgencyCrew
+So we must patch 'crew.CodingAgencyCrew', NOT 'server.CodingAgencyCrew'.
+
 Run with:
     uv run pytest tests/test_server.py -v
 """
 import pytest
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 
-# ---------------------------------------------------------------------------
-# Patch CodingAgencyCrew before importing the app so lifespan never calls
-# the real __init__ (which would try to connect to Ollama/FreeLLM)
-# ---------------------------------------------------------------------------
-
 MOCK_RESULT = "def binary_search(arr, target): ...  # LGTM - no issues"
+
 
 @pytest.fixture(scope="module")
 def client():
     """
     TestClient with CodingAgencyCrew fully mocked.
-    The lifespan warms up the mock instead of the real crew.
+    Patches 'crew.CodingAgencyCrew' because server.py imports it inside lifespan:
+        from crew import CodingAgencyCrew
     """
     mock_crew_instance = MagicMock()
     mock_crew_instance.run_with_healing.return_value = MOCK_RESULT
     mock_crew_instance.crew.return_value.kickoff.return_value = MOCK_RESULT
     mock_crew_instance.senior_architect.return_value = MagicMock()
     mock_crew_instance.senior_developer.return_value = MagicMock()
-    mock_crew_instance.qa_engineer.return_value     = MagicMock()
-    mock_crew_instance.planning_task.return_value   = MagicMock()
-    mock_crew_instance.coding_task.return_value     = MagicMock()
-    mock_crew_instance.review_task.return_value     = MagicMock()
+    mock_crew_instance.qa_engineer.return_value = MagicMock()
+    mock_crew_instance.planning_task.return_value = MagicMock()
+    mock_crew_instance.coding_task.return_value = MagicMock()
+    mock_crew_instance.review_task.return_value = MagicMock()
 
-    with patch("server.CodingAgencyCrew", return_value=mock_crew_instance):
-        # Also patch the Crew used inside single-step endpoints
+    # Patch where the class is DEFINED (crew module), not where it's used
+    with patch("crew.CodingAgencyCrew", return_value=mock_crew_instance):
+        # Also patch crewai.Crew used inside single-step endpoints (/api/plan, /code, /review)
         with patch("server.Crew") as mock_crew_cls:
             mock_inner_crew = MagicMock()
             mock_inner_crew.kickoff.return_value = MOCK_RESULT
@@ -73,8 +76,8 @@ class TestHealthAndInfo:
         assert r.status_code == 200
         ids = [m["id"] for m in r.json()["data"]]
         assert "coding-agency" in ids
-        assert "coding-code"   in ids
-        assert "coding-plan"   in ids
+        assert "coding-code" in ids
+        assert "coding-plan" in ids
         assert "coding-review" in ids
 
 
@@ -179,13 +182,12 @@ class TestOAIEndpoint:
     def test_response_has_oai_fields(self, client):
         r = self._chat(client)
         body = r.json()
-        assert "id"      in body
+        assert "id" in body
         assert "created" in body
-        assert "usage"   in body
+        assert "usage" in body
         assert body["id"].startswith("chatcmpl-")
 
     def test_language_detection_python(self, client):
-        """Python keyword in request should not crash the endpoint."""
         r = self._chat(client, content="write a Python class for a stack")
         assert r.status_code == 200
 
@@ -197,14 +199,12 @@ class TestOAIEndpoint:
         r = self._chat(client, stream=True)
         assert r.status_code == 200
         assert "text/event-stream" in r.headers["content-type"]
-        # First SSE chunk must start with 'data:'
         first_line = r.text.split("\n")[0]
         assert first_line.startswith("data:")
 
-    def test_empty_messages_returns_422(self, client):
+    def test_empty_messages_returns_422_or_500(self, client):
         r = client.post("/v1/chat/completions", json={
             "model": "coding-agency",
             "messages": [],
         })
-        # Empty messages list — server should handle gracefully (500 or 422)
         assert r.status_code in (422, 500)
