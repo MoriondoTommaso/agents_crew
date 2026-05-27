@@ -47,6 +47,53 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 
 Server is ready at `http://localhost:8000`. Check `GET /health`.
 
+## Docker
+
+The fastest way to get a reproducible, isolated environment.  
+Ollama keeps running on your host — the container reaches it via `host.docker.internal`.
+
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac/Windows) or Docker Engine + Compose plugin (Linux), plus Ollama running on the host with the models already pulled.
+
+```bash
+# 1. Configure
+cp .env.example .env
+# edit .env — OLLAMA_BASE_URL will be overridden automatically by docker-compose
+
+# 2. Build and start
+docker compose up --build
+
+# Detached (background)
+docker compose up --build -d
+docker compose logs -f
+```
+
+Server is available at `http://localhost:8000`.
+
+### Useful commands
+
+```bash
+docker compose up -d               # start (detached)
+docker compose down                # stop + remove container
+docker compose restart             # restart without rebuild
+docker compose build --no-cache    # force full rebuild (e.g. after pyproject.toml change)
+docker ps                          # check container status (shows healthy/starting)
+curl http://localhost:8000/health  # verify server is up
+```
+
+### How host networking works
+
+| Platform | `host.docker.internal` |
+|---|---|
+| Docker Desktop (Mac / Windows) | Resolved automatically |
+| Linux (Docker Engine) | Added via `extra_hosts: host.docker.internal:host-gateway` in `docker-compose.yml` |
+
+If you run Ollama on a different machine or port, override in `.env`:
+```bash
+OLLAMA_BASE_URL=http://192.168.1.42:11434
+```
+
+> **Note:** The `environment` block in `docker-compose.yml` sets `OLLAMA_BASE_URL` to `host.docker.internal` by default, overriding whatever is in `.env`. This is intentional — `localhost` inside a container points to the container itself, not the host.
+
 ## API Endpoints
 
 ### OpenAI-compatible
@@ -84,16 +131,18 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Open-Claw
 
-Add a provider in your Open-Claw config:
+```bash
+openclaw onboard --non-interactive \
+  --auth-choice custom-api-key \
+  --custom-base-url "http://localhost:8000/v1" \
+  --custom-model-id "coding-agency" \
+  --custom-api-key "local" \
+  --custom-compatibility openai
 
-```json
-{
-  "provider": "openai",
-  "base_url": "http://localhost:8000/v1",
-  "api_key": "local",
-  "model": "coding-agency"
-}
+openclaw models set custom/coding-agency
 ```
+
+Or manually in `~/.openclaw/openclaw.json` under `models.providers` — see the [OpenClaw docs](https://docs.openclaw.ai/providers/models).
 
 ### Aider
 
@@ -148,6 +197,8 @@ agents_crew/
 ├── tests/
 │   ├── test_router.py # SMLRouter unit tests
 │   └── test_server.py # FastAPI endpoint tests
+├── Dockerfile
+├── docker-compose.yml
 ├── .env.example
 └── pyproject.toml
 ```
