@@ -16,16 +16,14 @@ class TaskType(str, Enum):
 
 # ---------------------------------------------------------------------------
 # SML Router
-# Binary decision: API (FreeLLM picks the model) vs LOCAL (qwen2.5-coder:12b)
 # ---------------------------------------------------------------------------
 class SMLRouter:
     """
     Routes tasks to either:
-    - api_llm  : FreeLLM endpoint (planning + review) — FreeLLM picks the model
-    - local_llm: Ollama qwen2.5-coder:12b (coding)   — zero API consumption
+    - api_llm  : FreeLLM endpoint (planning + review)
+    - local_llm: Ollama qwen2.5-coder:12b (coding)
 
     The router itself uses qwen2.5:1.5b locally — no external calls ever.
-    Upgraded from 0.5b: 1.5b follows JSON instructions reliably.
     """
 
     SYSTEM_PROMPT = (
@@ -41,6 +39,9 @@ class SMLRouter:
         "coding_task":   "local",
         "review_task":   "api",
     }
+
+    # Keywords that signal LOCAL (coding) — must match as whole words
+    _LOCAL_KEYWORDS = {"implement", "write", "develop", "build", "generate", "create"}
 
     def __init__(self, api_llm: LLM, local_llm: LLM):
         self.api_llm   = api_llm
@@ -68,8 +69,9 @@ class SMLRouter:
             return self._keyword_fallback(task_description)
 
     def _keyword_fallback(self, text: str) -> str:
-        t = text.lower()
-        if any(w in t for w in ["implement", "write", "code", "develop", "build", "generate"]):
+        """Word-boundary keyword match — avoids 'code' matching inside 'review this code'."""
+        words = set(text.lower().split())
+        if words & self._LOCAL_KEYWORDS:
             return "local"
         return "api"
 
