@@ -16,70 +16,84 @@ class TaskType(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# SML Router
-# Uses a lightweight model (Llama 3.1 8B via Groq) to classify the current
-# task type and return the appropriate LLM handle.
+# SML Router — fully local, zero API calls
+# Uses qwen2.5:0.5b via Ollama for intent classification
 # ---------------------------------------------------------------------------
 class SMLRouter:
     """
     Small-Model Router: classifies a task description into one of
-    [planning, coding, review] and returns the right LLM.
+    [planning, coding, review] using a local 0.5B model.
+    No API calls, <100ms latency on Apple Silicon.
     """
 
-    SYSTEM_PROMPT = """You are a routing classifier for a coding agent pipeline.
-    Given a task description, output ONLY a JSON object with a single key
-    'task_type' whose value is one of: 'planning', 'coding', 'review'.
-    Do not add any explanation."""
+    SYSTEM_PROMPT = (
+        "You are a routing classifier for a coding agent pipeline. "
+        "Given a task description, output ONLY a raw JSON object with a "
+        "single key 'task_type' whose value is one of: "
+        "'planning', 'coding', 'review'. "
+        "No explanation, no markdown, just the JSON."
+    )
+
+    # Hardcoded overrides — no inference needed for known task keys
+    _OVERRIDES: dict[str, TaskType] = {
+        "planning_task": TaskType.PLANNING,
+        "coding_task":   TaskType.CODING,
+        "review_task":   TaskType.REVIEW,
+    }
 
     def __init__(self, frontier_llm: ChatOpenAI, local_llm: ChatOpenAI):
-        # The router itself uses a fast, cheap small model
-        self.router_llm = ChatOpenAI(
-            openai_api_base="https://api.groq.com/openai/v1",
-            openai_api_key=os.getenv("GROQ_API_KEY"),
-            model_name="llama-3.1-8b-instant",
-            temperature=0.0,
-            max_tokens=32,
-        )
         self.frontier_llm = frontier_llm
         self.local_llm    = local_llm
 
-        # Explicit override map (task yaml key → forced type)
-        self._overrides: dict[str, TaskType] = {
-            "planning_task": TaskType.PLANNING,
-            "coding_task":   TaskType.CODING,
-            "review_task":   TaskType.REVIEW,
-        }
+        # Router: local qwen2.5:0.5b — tiny, fast, free
+        self._router_llm = ChatOpenAI(
+            openai_api_base=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            openai_api_key="ollama",
+            model_name="qwen2.5:0.5b",
+            temperature=0.0,
+            max_tokens=32,
+        )
 
     def classify(self, task_description: str, task_key: str | None = None) -> TaskType:
-        """Classify by task_key override first, then SML inference."""
-        if task_key and task_key in self._overrides:
-            return self._overrides[task_key]
+        """Classify task type. Override map is checked first."""
+        # 1. Fast path: hardcoded override
+        if task_key and task_key in self._OVERRIDES:
+            return self._OVERRIDES[task_key]
 
+        # 2. SML inference via local Ollama
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user",   "content": task_description[:512]},
         ]
         try:
-            response = self.router_llm.invoke(messages)
-            payload  = json.loads(response.content.strip())
+            response = self._router_llm.invoke(messages)
+            raw = response.content.strip()
+            # Strip potential markdown code fences
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            payload = json.loads(raw)
             return TaskType(payload["task_type"])
-        except Exception:
-            # Fallback heuristic
-            desc_lower = task_description.lower()
-            if any(w in desc_lower for w in ["design", "plan", "architect", "specification"]):
-                return TaskType.PLANNING
-            if any(w in desc_lower for w in ["implement", "write", "code", "develop"]):
-                return TaskType.CODING
-            return TaskType.REVIEW
+        except Exception as e:
+            print(f"[SMLRouter] Inference fallback triggered: {e}")
+            return self._keyword_fallback(task_description)
+
+    def _keyword_fallback(self, text: str) -> TaskType:
+        """Heuristic fallback when SML output is unparseable."""
+        t = text.lower()
+        if any(w in t for w in ["design", "plan", "architect", "specification", "requirement"]):
+            return TaskType.PLANNING
+        if any(w in t for w in ["implement", "write", "code", "develop", "build"]):
+            return TaskType.CODING
+        return TaskType.REVIEW
 
     def route(self, task_description: str, task_key: str | None = None) -> ChatOpenAI:
-        """Return the right LLM for the classified task type."""
+        """Return the right LLM for the given task."""
         task_type = self.classify(task_description, task_key)
-        print(f"[SMLRouter] '{task_key or 'dynamic'}' → {task_type.value}")
+        emoji = {TaskType.PLANNING: "📐", TaskType.CODING: "💻", TaskType.REVIEW: "🔍"}
+        print(f"[SMLRouter] '{task_key or 'dynamic'}' → {emoji[task_type]} {task_type.value}")
 
         if task_type == TaskType.CODING:
-            return self.local_llm        # Qwen Coder 12B via Ollama
-        return self.frontier_llm         # Frontier model for planning + review
+            return self.local_llm      # qwen2.5-coder:12b via Ollama
+        return self.frontier_llm       # frontier model for planning + review
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +101,12 @@ class SMLRouter:
 # ---------------------------------------------------------------------------
 @CrewBase
 class CodingAgencyCrew():
-    """Hybrid Coding Agency Crew — SML-routed local + cloud LLMs."""
+    """Hybrid Coding Agency Crew — fully local SML router, zero routing API calls."""
 
     MAX_REVIEW_ITERATIONS = 3
 
     def __init__(self) -> None:
-        # ── Frontier LLM (FreeLLM / OpenRouter) ──────────────────────────
+        # ── Frontier LLM (FreeLLM / OpenRouter) ──────────────────────────────
         self.frontier_llm = ChatOpenAI(
             openai_api_base=os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1"),
             openai_api_key=os.getenv("FREELLMAPI_KEY", "none"),
@@ -100,7 +114,7 @@ class CodingAgencyCrew():
             temperature=0.2,
         )
 
-        # ── Local LLM: Qwen Coder 12B via Ollama ─────────────────────────
+        # ── Local LLM: Qwen Coder 12B via Ollama ─────────────────────────────
         self.local_llm = ChatOpenAI(
             openai_api_base=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
             openai_api_key="ollama",
@@ -108,13 +122,13 @@ class CodingAgencyCrew():
             temperature=0.1,
         )
 
-        # ── SML Router ────────────────────────────────────────────────────
+        # ── SML Router: local qwen2.5:0.5b, zero external calls ───────────────
         self.router = SMLRouter(
             frontier_llm=self.frontier_llm,
             local_llm=self.local_llm,
         )
 
-    # ── Agents ────────────────────────────────────────────────────────────
+    # ── Agents ────────────────────────────────────────────────────────────────
 
     @agent
     def senior_architect(self) -> Agent:
@@ -149,7 +163,7 @@ class CodingAgencyCrew():
             verbose=True,
         )
 
-    # ── Tasks ─────────────────────────────────────────────────────────────
+    # ── Tasks ─────────────────────────────────────────────────────────────────
 
     @task
     def planning_task(self) -> Task:
@@ -166,7 +180,7 @@ class CodingAgencyCrew():
             output_file='report.md',
         )
 
-    # ── Crew + self-healing loop ──────────────────────────────────────────
+    # ── Crew + self-healing loop ───────────────────────────────────────────────
 
     @crew
     def crew(self) -> Crew:
@@ -179,43 +193,42 @@ class CodingAgencyCrew():
 
     def run_with_healing(self, inputs: dict) -> str:
         """
-        Run the full pipeline with a self-healing loop.
-        If the QA review finds errors, the feedback is injected back into
-        the coding task and the code+review cycle repeats (max 3 iterations).
+        Run the full pipeline with self-healing loop.
+        QA review feedback is injected back into the coding task
+        on each retry until LGTM or max iterations reached.
         """
-        iteration   = 0
-        feedback    = ""
+        iteration    = 0
+        feedback     = ""
         final_result = None
 
         while iteration < self.MAX_REVIEW_ITERATIONS:
             iteration += 1
-            print(f"\n[Pipeline] Iteration {iteration}/{self.MAX_REVIEW_ITERATIONS}")
+            print(f"\n{'='*60}")
+            print(f"[Pipeline] Iteration {iteration}/{self.MAX_REVIEW_ITERATIONS}")
+            print(f"{'='*60}")
 
-            # Inject prior review feedback into coding task on retry
+            run_inputs = dict(inputs)
             if feedback:
-                augmented = dict(inputs)
-                augmented["review_feedback"] = (
-                    f"\n\nPrevious review found issues — fix them:\n{feedback}"
+                run_inputs["review_feedback"] = (
+                    f"\n\n--- Previous QA review found issues, fix them ---\n{feedback}"
                 )
             else:
-                augmented = inputs
+                run_inputs.setdefault("review_feedback", "")
 
-            result = self.crew().kickoff(inputs=augmented)
+            result       = self.crew().kickoff(inputs=run_inputs)
             final_result = result
+            output_text  = str(result).lower()
 
-            # Parse result to check if QA flagged errors
-            output_text = str(result)
-            no_errors = any(
-                phrase in output_text.lower()
-                for phrase in ["no issues", "lgtm", "approved", "no errors", "passes all"]
+            passed = any(
+                phrase in output_text
+                for phrase in ["lgtm", "no issues", "no errors", "approved", "passes all"]
             )
 
-            if no_errors:
-                print(f"[Pipeline] QA passed on iteration {iteration}. Done.")
+            if passed:
+                print(f"[Pipeline] ✅ QA passed on iteration {iteration}.")
                 break
-
-            # Extract feedback for next iteration
-            feedback = output_text
-            print(f"[Pipeline] QA found issues. Retrying (iteration {iteration+1}).")
+            else:
+                feedback = str(result)
+                print(f"[Pipeline] ⚠️  QA found issues — retrying ({iteration+1}/{self.MAX_REVIEW_ITERATIONS}).")
 
         return str(final_result)
