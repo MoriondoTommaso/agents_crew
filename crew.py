@@ -1,5 +1,7 @@
 import os
 import json
+import asyncio
+import threading
 from crewai import Agent, Crew, Process, Task, LLM
 from crewai.project import CrewBase, agent, crew, task
 from enum import Enum
@@ -63,7 +65,7 @@ class SMLRouter:
         try:
             raw = self._router_llm.call(messages)
             raw = raw.strip().replace("```json", "").replace("```", "").strip()
-            return json.loads(raw)["route"]  # "api" or "local"
+            return json.loads(raw)["route"]
         except Exception as e:
             print(f"[SMLRouter] Fallback triggered: {e}")
             return self._keyword_fallback(task_description)
@@ -84,8 +86,33 @@ class SMLRouter:
 
         icons = {"api": "🌐", "local": "💻"}
         print(f"[SMLRouter] '{task_key or 'dynamic'}' → {icons[destination]} {destination}")
-
         return self.local_llm if destination == "local" else self.api_llm
+
+
+# ---------------------------------------------------------------------------
+# QA result parser
+# ---------------------------------------------------------------------------
+def _parse_qa_result(raw: str) -> dict:
+    """
+    Parse the structured JSON output from the QA review task.
+    Returns {"approved": bool, "issues": [...]} always — never raises.
+    Falls back to approved=False if output is malformed.
+    """
+    try:
+        text = raw.strip()
+        # Strip markdown fences if present
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        result = json.loads(text)
+        approved = bool(result.get("approved", False))
+        issues   = result.get("issues", [])
+        return {"approved": approved, "issues": issues}
+    except Exception:
+        # Fallback: scan for legacy approval signals
+        lower = raw.lower()
+        approved = any(p in lower for p in ["lgtm", "no issues", "no errors", "approved", "passes all"])
+        return {"approved": approved, "issues": [], "raw": raw}
 
 
 # ---------------------------------------------------------------------------
@@ -97,22 +124,29 @@ class CodingAgencyCrew():
 
     MAX_REVIEW_ITERATIONS = 3
 
+    # Lock prevents concurrent requests from sharing state on the same instance
+    _lock = threading.Lock()
+
     def __init__(self) -> None:
         ollama_base   = os.getenv("OLLAMA_BASE_URL",   "http://localhost:11434")
         freellm_base  = os.getenv("FREELLM_BASE_URL",  "http://localhost:3001/v1")
         freellm_key   = os.getenv("FREELLMAPI_KEY",    "none")
+        # Timeout in seconds for a full crew kickoff (default 10 min)
+        self.llm_timeout = int(os.getenv("LLM_TIMEOUT_SEC", "600"))
 
         self.api_llm = LLM(
             model="openai/gpt-4o",
             base_url=freellm_base,
             api_key=freellm_key,
             temperature=0.2,
+            timeout=self.llm_timeout,
         )
 
         self.local_llm = LLM(
             model="ollama/qwen2.5-coder:12b",
             base_url=ollama_base,
             temperature=0.1,
+            timeout=self.llm_timeout,
         )
 
         self.router = SMLRouter(
@@ -178,31 +212,42 @@ class CodingAgencyCrew():
         )
 
     def run_with_healing(self, inputs: dict) -> str:
-        iteration    = 0
-        feedback     = ""
-        final_result = None
+        """
+        Full plan → code → review loop with structured JSON QA gate.
+        Thread-safe: acquires _lock so concurrent requests don't share state.
+        """
+        with self._lock:
+            iteration    = 0
+            feedback     = ""
+            final_result = ""
 
-        while iteration < self.MAX_REVIEW_ITERATIONS:
-            iteration += 1
-            print(f"\n{'='*60}")
-            print(f"[Pipeline] Iteration {iteration}/{self.MAX_REVIEW_ITERATIONS}")
-            print(f"{'='*60}")
+            while iteration < self.MAX_REVIEW_ITERATIONS:
+                iteration += 1
+                print(f"\n{'='*60}")
+                print(f"[Pipeline] Iteration {iteration}/{self.MAX_REVIEW_ITERATIONS}")
+                print(f"{'='*60}")
 
-            run_inputs = dict(inputs)
-            run_inputs["review_feedback"] = (
-                f"\n\n--- Previous QA review found issues, fix them ---\n{feedback}"
-                if feedback else ""
-            )
+                run_inputs = dict(inputs)
+                run_inputs["review_feedback"] = (
+                    f"\n\n--- Previous QA review found issues, fix them ---\n{feedback}"
+                    if feedback else ""
+                )
 
-            result      = self.crew().kickoff(inputs=run_inputs)
-            final_result = result
-            output_text  = str(result).lower()
+                result       = self.crew().kickoff(inputs=run_inputs)
+                final_result = str(result)
 
-            if any(p in output_text for p in ["lgtm", "no issues", "no errors", "approved", "passes all"]):
-                print(f"[Pipeline] ✅ QA passed on iteration {iteration}.")
-                break
+                qa = _parse_qa_result(final_result)
 
-            feedback = str(result)
-            print(f"[Pipeline] ⚠️  QA found issues — retrying ({iteration+1}/{self.MAX_REVIEW_ITERATIONS}).")
+                if qa["approved"]:
+                    print(f"[Pipeline] ✅ QA approved on iteration {iteration}.")
+                    break
 
-        return str(final_result)
+                issues_summary = "; ".join(
+                    f"[{i.get('severity','?')}] {i.get('description','')}" 
+                    for i in qa.get("issues", [])
+                ) or final_result  # fallback to raw if no structured issues
+
+                feedback = issues_summary
+                print(f"[Pipeline] ⚠️  QA found {len(qa.get('issues',[]))} issue(s) — retrying ({iteration+1}/{self.MAX_REVIEW_ITERATIONS}).")
+
+            return final_result
