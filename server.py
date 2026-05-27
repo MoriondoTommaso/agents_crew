@@ -2,8 +2,11 @@
 FastAPI server for the Hybrid Coding Agency.
 
 Exposes two types of endpoints:
-  1. /v1/chat/completions  — OpenAI-compatible (for harness like Open-Claw, Aider, Continue.dev)
-  2. /api/*                — Native endpoints with full pipeline control
+  1. /v1/chat/completions  — OpenAI-compatible (for harnesses: Open-Claw, Aider, Continue.dev)
+  2. /api/*                — Native endpoints
+
+Pipeline: plan (api_llm) → code (local_llm)  [single pass]
+Iteration/healing is delegated to the harness via real code execution tools.
 
 Start with:
     uv run uvicorn server:app --host 0.0.0.0 --port 8000 --reload
@@ -44,8 +47,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Hybrid Coding Agency",
-    description="LLM orchestration server — OpenAI-compatible + native API",
-    version="0.2.0",
+    description="SML router: plan→api_llm, code→local_llm. OpenAI-compatible.",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -55,15 +58,13 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 class CodeRequest(BaseModel):
-    user_request: str   = Field(..., description="What to build")
-    language:     str   = Field(default="Python", description="Target language")
-    topic:        str   = Field(default="software", description="Domain/context")
-    healing:      bool  = Field(default=True,  description="Enable self-healing QA loop")
+    user_request: str = Field(..., description="What to build")
+    language:     str = Field(default="Python", description="Target language")
+    topic:        str = Field(default="software", description="Domain/context")
 
 class CodeResponse(BaseModel):
     request_id:  str
     result:      str
-    iterations:  int | None = None
     elapsed_sec: float
 
 class OAIMessage(BaseModel):
@@ -83,10 +84,6 @@ class OAIChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _extract_user_request(messages: list[OAIMessage]) -> str:
-    """
-    Extract the last user message as the coding request.
-    Raises HTTP 422 if messages is empty.
-    """
     if not messages:
         raise HTTPException(status_code=422, detail="messages list must not be empty")
     for msg in reversed(messages):
@@ -143,7 +140,7 @@ async def _stream_oai_response(content: str, model: str = "coding-agency") -> As
 
 
 async def _run_with_timeout(fn, *args):
-    """Run a blocking function in a thread pool with a hard timeout."""
+    """Run a blocking function in a thread with a hard timeout → HTTP 504 on expiry."""
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(fn, *args),
@@ -152,7 +149,7 @@ async def _run_with_timeout(fn, *args):
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail=f"Pipeline timed out after {LLM_TIMEOUT_SEC}s. Try a simpler request or increase LLM_TIMEOUT_SEC."
+            detail=f"Pipeline timed out after {LLM_TIMEOUT_SEC}s. Increase LLM_TIMEOUT_SEC or simplify the request."
         )
 
 
@@ -167,26 +164,18 @@ async def health():
 
 @app.post("/api/run", response_model=CodeResponse)
 async def run_pipeline(req: CodeRequest):
+    """Full plan → code pipeline (single pass)."""
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
     request_id = uuid.uuid4().hex[:8]
-    start      = time.time()
-
+    start = time.time()
     inputs = {
-        "user_request":    req.user_request,
-        "language":        req.language,
-        "topic":           req.topic,
-        "review_feedback": "",
+        "user_request": req.user_request,
+        "language":     req.language,
+        "topic":        req.topic,
     }
-
-    if req.healing:
-        result = await _run_with_timeout(crew_instance.run_with_healing, inputs)
-    else:
-        result = await _run_with_timeout(
-            lambda: str(crew_instance.crew().kickoff(inputs=inputs))
-        )
-
+    result = await _run_with_timeout(crew_instance.run, inputs)
     return CodeResponse(
         request_id  = request_id,
         result      = result,
@@ -196,12 +185,12 @@ async def run_pipeline(req: CodeRequest):
 
 @app.post("/api/plan")
 async def plan_only(req: CodeRequest):
+    """Planning task only (senior_architect → api_llm)."""
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
     from crewai import Crew, Process
     inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
-
     result = await _run_with_timeout(
         lambda: str(Crew(
             agents=[crew_instance.senior_architect()],
@@ -214,13 +203,12 @@ async def plan_only(req: CodeRequest):
 
 @app.post("/api/code")
 async def code_only(req: CodeRequest):
+    """Coding task only (senior_developer → local_llm)."""
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
     from crewai import Crew, Process
-    inputs = {"user_request": req.user_request, "language": req.language,
-              "topic": req.topic, "review_feedback": ""}
-
+    inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
     result = await _run_with_timeout(
         lambda: str(Crew(
             agents=[crew_instance.senior_developer()],
@@ -231,31 +219,12 @@ async def code_only(req: CodeRequest):
     return {"result": result}
 
 
-@app.post("/api/review")
-async def review_only(req: CodeRequest):
-    if crew_instance is None:
-        raise HTTPException(status_code=503, detail="Crew not initialized")
-
-    from crewai import Crew, Process
-    inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
-
-    result = await _run_with_timeout(
-        lambda: str(Crew(
-            agents=[crew_instance.qa_engineer()],
-            tasks=[crew_instance.review_task()],
-            process=Process.sequential, verbose=False,
-        ).kickoff(inputs=inputs))
-    )
-    return {"result": result}
-
-
 @app.get("/api/models")
 async def list_models():
     return {
-        "router":   "qwen2.5:1.5b (Ollama local)",
-        "planner":  "auto via FreeLLM (frontier)",
-        "coder":    "qwen2.5-coder:12b (Ollama local)",
-        "reviewer": "auto via FreeLLM (frontier)",
+        "router":  "qwen2.5:1.5b (Ollama local)",
+        "planner": "auto via FreeLLM (frontier)",
+        "coder":   "qwen2.5-coder:12b (Ollama local)",
     }
 
 
@@ -268,10 +237,9 @@ async def oai_list_models():
     return {
         "object": "list",
         "data": [
-            {"id": "coding-agency",   "object": "model", "owned_by": "local"},
-            {"id": "coding-plan",     "object": "model", "owned_by": "local"},
-            {"id": "coding-code",     "object": "model", "owned_by": "local"},
-            {"id": "coding-review",   "object": "model", "owned_by": "local"},
+            {"id": "coding-agency", "object": "model", "owned_by": "local"},
+            {"id": "coding-plan",   "object": "model", "owned_by": "local"},
+            {"id": "coding-code",   "object": "model", "owned_by": "local"},
         ]
     }
 
@@ -281,17 +249,18 @@ async def oai_chat_completions(
     req: OAIChatRequest,
     authorization: str | None = Header(default=None),
 ):
+    """
+    OpenAI-compatible endpoint. Model routing:
+      coding-agency  → full plan + code (default)
+      coding-plan    → planning only
+      coding-code    → coding only (local model)
+    """
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
     user_request = _extract_user_request(req.messages)
     language     = _parse_language_from_text(user_request)
-
-    native_req = CodeRequest(
-        user_request = user_request,
-        language     = language,
-        healing      = req.model != "coding-code",
-    )
+    native_req   = CodeRequest(user_request=user_request, language=language)
 
     if req.model == "coding-plan":
         resp    = await plan_only(native_req)
@@ -299,10 +268,7 @@ async def oai_chat_completions(
     elif req.model == "coding-code":
         resp    = await code_only(native_req)
         content = resp["result"]
-    elif req.model == "coding-review":
-        resp    = await review_only(native_req)
-        content = resp["result"]
-    else:
+    else:  # coding-agency or any unknown model
         code_resp = await run_pipeline(native_req)
         content   = code_resp.result
 
@@ -311,5 +277,4 @@ async def oai_chat_completions(
             _stream_oai_response(content, req.model),
             media_type="text/event-stream",
         )
-
     return JSONResponse(_oai_response(content, req.model))

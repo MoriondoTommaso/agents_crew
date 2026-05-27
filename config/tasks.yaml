@@ -14,25 +14,6 @@ coding_task:
   description: >
     Using the technical design provided, implement the full solution in {language}.
     Ensure the code is modular, includes docstrings, and handles edge cases.
-    {review_feedback}
   expected_output: >
-    The complete, executable source code file with inline documentation.
+    The complete, executable source code with inline documentation.
   agent: senior_developer
-
-review_task:
-  description: >
-    Review the code for: logical errors, security vulnerabilities (injection,
-    auth bypass, unvalidated inputs), performance bottlenecks, and missing
-    edge case handling. Verify the code fully satisfies the original request.
-
-    You MUST reply with ONLY a JSON object — no markdown, no prose outside the JSON.
-    Schema:
-      {"approved": true}                          <- if code is correct
-      {"approved": false, "issues": [
-        {"severity": "critical|major|minor",
-         "description": "...",
-         "fix": "corrected code snippet"}
-      ]}
-  expected_output: >
-    A JSON object matching the schema above. Nothing else.
-  agent: qa_engineer
