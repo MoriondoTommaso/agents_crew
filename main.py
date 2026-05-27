@@ -4,16 +4,16 @@ from crew import CodingAgencyCrew
 load_dotenv()
 
 def run():
-    # Define the specific inputs for our cutting-edge agents
     inputs = {
-        'topic': 'Graph Theory Spectral Indexing',
-        'language': 'Python',
-        'user_request': 'Create a high-performance script to calculate the Normalized Laplacian Matrix and the Fiedler Vector of a sparse graph.'
+        'topic':           'Graph Theory Spectral Indexing',
+        'language':        'Python',
+        'user_request':    'Create a high-performance script to calculate the Normalized Laplacian Matrix and the Fiedler Vector of a sparse graph.',
+        'review_feedback': '',
     }
-    
-    print("🚀 Initializing the Hybrid Autonomous Agency...")
-    result = CodingAgencyCrew().crew().kickoff(inputs=inputs)
-    
+
+    print("\ud83d\ude80 Initializing the Hybrid Autonomous Agency...")
+    result = CodingAgencyCrew().run_with_healing(inputs=inputs)
+
     print("\n######################")
     print("## FINAL OUTPUT")
     print("######################\n")
