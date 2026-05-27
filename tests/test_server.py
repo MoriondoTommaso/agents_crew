@@ -2,9 +2,9 @@
 Test suite for the FastAPI server endpoints.
 All tests mock CodingAgencyCrew completely — zero API calls, zero Ollama calls.
 
-Critical: CodingAgencyCrew is imported INSIDE the lifespan function in server.py:
-    from crew import CodingAgencyCrew
-So we must patch 'crew.CodingAgencyCrew', NOT 'server.CodingAgencyCrew'.
+Patch targets:
+- 'crew.CodingAgencyCrew'  : imported inside lifespan() with `from crew import CodingAgencyCrew`
+- 'crewai.Crew'            : imported inside each endpoint with `from crewai import Crew, Process`
 
 Run with:
     uv run pytest tests/test_server.py -v
@@ -23,11 +23,6 @@ MOCK_RESULT = "def binary_search(arr, target): ...  # LGTM - no issues"
 
 @pytest.fixture(scope="module")
 def client():
-    """
-    TestClient with CodingAgencyCrew fully mocked.
-    Patches 'crew.CodingAgencyCrew' because server.py imports it inside lifespan:
-        from crew import CodingAgencyCrew
-    """
     mock_crew_instance = MagicMock()
     mock_crew_instance.run_with_healing.return_value = MOCK_RESULT
     mock_crew_instance.crew.return_value.kickoff.return_value = MOCK_RESULT
@@ -38,17 +33,16 @@ def client():
     mock_crew_instance.coding_task.return_value = MagicMock()
     mock_crew_instance.review_task.return_value = MagicMock()
 
-    # Patch where the class is DEFINED (crew module), not where it's used
-    with patch("crew.CodingAgencyCrew", return_value=mock_crew_instance):
-        # Also patch crewai.Crew used inside single-step endpoints (/api/plan, /code, /review)
-        with patch("server.Crew") as mock_crew_cls:
-            mock_inner_crew = MagicMock()
-            mock_inner_crew.kickoff.return_value = MOCK_RESULT
-            mock_crew_cls.return_value = mock_inner_crew
+    mock_inner_crew = MagicMock()
+    mock_inner_crew.kickoff.return_value = MOCK_RESULT
 
-            from server import app
-            with TestClient(app, raise_server_exceptions=True) as c:
-                yield c
+    # crew.CodingAgencyCrew: imported inside lifespan() → patch at definition site
+    # crewai.Crew: imported inside endpoint functions → patch at definition site
+    with patch("crew.CodingAgencyCrew", return_value=mock_crew_instance), \
+         patch("crewai.Crew", return_value=mock_inner_crew):
+        from server import app
+        with TestClient(app, raise_server_exceptions=True) as c:
+            yield c
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +169,6 @@ class TestOAIEndpoint:
         assert r.status_code == 200
 
     def test_unknown_model_falls_back_to_full_pipeline(self, client):
-        """Any unrecognized model name runs the full pipeline."""
         r = self._chat(client, model="some-random-model")
         assert r.status_code == 200
 

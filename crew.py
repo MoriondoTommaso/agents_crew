@@ -21,10 +21,11 @@ class TaskType(str, Enum):
 class SMLRouter:
     """
     Routes tasks to either:
-      - api_llm  : FreeLLM endpoint (planning + review) — FreeLLM picks the model
-      - local_llm: Ollama qwen2.5-coder:12b (coding)   — zero API consumption
+    - api_llm  : FreeLLM endpoint (planning + review) — FreeLLM picks the model
+    - local_llm: Ollama qwen2.5-coder:12b (coding)   — zero API consumption
 
-    The router itself uses qwen2.5:0.5b locally — no external calls ever.
+    The router itself uses qwen2.5:1.5b locally — no external calls ever.
+    Upgraded from 0.5b: 1.5b follows JSON instructions reliably.
     """
 
     SYSTEM_PROMPT = (
@@ -46,14 +47,14 @@ class SMLRouter:
         self.local_llm = local_llm
 
         self._router_llm = LLM(
-            model="ollama/qwen2.5:0.5b",
+            model="ollama/qwen2.5:1.5b",
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             temperature=0.0,
             max_tokens=16,
         )
 
     def _infer(self, task_description: str) -> str:
-        """Ask the local 0.5B model: 'api' or 'local'?"""
+        """Ask the local 1.5B model: 'api' or 'local'?"""
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user",   "content": task_description[:512]},
@@ -74,11 +75,9 @@ class SMLRouter:
 
     def route(self, task_description: str, task_key: str | None = None) -> LLM:
         """Return the right LLM. Override map is always checked first."""
-        # 1. Hardcoded override for known task keys (no model call)
         if task_key and task_key in self._OVERRIDES:
             destination = self._OVERRIDES[task_key]
         else:
-            # 2. SML inference for dynamic tasks
             destination = self._infer(task_description)
 
         icons = {"api": "🌐", "local": "💻"}
@@ -97,12 +96,10 @@ class CodingAgencyCrew():
     MAX_REVIEW_ITERATIONS = 3
 
     def __init__(self) -> None:
-        ollama_base  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        freellm_base = os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1")
-        freellm_key  = os.getenv("FREELLMAPI_KEY", "none")
+        ollama_base   = os.getenv("OLLAMA_BASE_URL",   "http://localhost:11434")
+        freellm_base  = os.getenv("FREELLM_BASE_URL",  "http://localhost:3001/v1")
+        freellm_key   = os.getenv("FREELLMAPI_KEY",    "none")
 
-        # API LLM: FreeLLM proxy — it picks the best available model automatically.
-        # We pass gpt-4o as a canonical name; FreeLLM ignores it and routes freely.
         self.api_llm = LLM(
             model="openai/gpt-4o",
             base_url=freellm_base,
@@ -110,7 +107,6 @@ class CodingAgencyCrew():
             temperature=0.2,
         )
 
-        # Local LLM: Qwen Coder 12B — heavy lifting, zero API consumption.
         self.local_llm = LLM(
             model="ollama/qwen2.5-coder:12b",
             base_url=ollama_base,
@@ -196,7 +192,7 @@ class CodingAgencyCrew():
                 if feedback else ""
             )
 
-            result       = self.crew().kickoff(inputs=run_inputs)
+            result      = self.crew().kickoff(inputs=run_inputs)
             final_result = result
             output_text  = str(result).lower()
 
