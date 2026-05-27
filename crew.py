@@ -1,8 +1,7 @@
 import os
 import json
-from crewai import Agent, Crew, Process, Task
+from crewai import Agent, Crew, Process, Task, LLM
 from crewai.project import CrewBase, agent, crew, task
-from langchain_openai import ChatOpenAI
 from enum import Enum
 
 
@@ -34,28 +33,25 @@ class SMLRouter:
         "No explanation, no markdown, just the JSON."
     )
 
-    # Hardcoded overrides — no inference needed for known task keys
     _OVERRIDES: dict[str, TaskType] = {
         "planning_task": TaskType.PLANNING,
         "coding_task":   TaskType.CODING,
         "review_task":   TaskType.REVIEW,
     }
 
-    def __init__(self, frontier_llm: ChatOpenAI, local_llm: ChatOpenAI):
+    def __init__(self, frontier_llm: LLM, local_llm: LLM):
         self.frontier_llm = frontier_llm
         self.local_llm    = local_llm
 
-        # Router: local qwen2.5:0.5b — tiny, fast, free
-        self._router_llm = ChatOpenAI(
-            openai_api_base=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-            openai_api_key="ollama",
-            model_name="qwen2.5:0.5b",
+        # Router: tiny local model, zero external calls
+        self._router_llm = LLM(
+            model="ollama/qwen2.5:0.5b",
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             temperature=0.0,
             max_tokens=32,
         )
 
     def classify(self, task_description: str, task_key: str | None = None) -> TaskType:
-        """Classify task type. Override map is checked first."""
         # 1. Fast path: hardcoded override
         if task_key and task_key in self._OVERRIDES:
             return self._OVERRIDES[task_key]
@@ -66,10 +62,8 @@ class SMLRouter:
             {"role": "user",   "content": task_description[:512]},
         ]
         try:
-            response = self._router_llm.invoke(messages)
-            raw = response.content.strip()
-            # Strip potential markdown code fences
-            raw = raw.replace("```json", "").replace("```", "").strip()
+            response = self._router_llm.call(messages)
+            raw = response.strip().replace("```json", "").replace("```", "").strip()
             payload = json.loads(raw)
             return TaskType(payload["task_type"])
         except Exception as e:
@@ -77,7 +71,6 @@ class SMLRouter:
             return self._keyword_fallback(task_description)
 
     def _keyword_fallback(self, text: str) -> TaskType:
-        """Heuristic fallback when SML output is unparseable."""
         t = text.lower()
         if any(w in t for w in ["design", "plan", "architect", "specification", "requirement"]):
             return TaskType.PLANNING
@@ -85,15 +78,13 @@ class SMLRouter:
             return TaskType.CODING
         return TaskType.REVIEW
 
-    def route(self, task_description: str, task_key: str | None = None) -> ChatOpenAI:
-        """Return the right LLM for the given task."""
+    def route(self, task_description: str, task_key: str | None = None) -> LLM:
         task_type = self.classify(task_description, task_key)
         emoji = {TaskType.PLANNING: "📐", TaskType.CODING: "💻", TaskType.REVIEW: "🔍"}
         print(f"[SMLRouter] '{task_key or 'dynamic'}' → {emoji[task_type]} {task_type.value}")
-
         if task_type == TaskType.CODING:
-            return self.local_llm      # qwen2.5-coder:12b via Ollama
-        return self.frontier_llm       # frontier model for planning + review
+            return self.local_llm
+        return self.frontier_llm
 
 
 # ---------------------------------------------------------------------------
@@ -106,29 +97,29 @@ class CodingAgencyCrew():
     MAX_REVIEW_ITERATIONS = 3
 
     def __init__(self) -> None:
-        # ── Frontier LLM (FreeLLM / OpenRouter) ──────────────────────────────
-        self.frontier_llm = ChatOpenAI(
-            openai_api_base=os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1"),
-            openai_api_key=os.getenv("FREELLMAPI_KEY", "none"),
-            model_name="auto",
+        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        freellm_base = os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1")
+
+        # Frontier LLM via FreeLLM (planning + review)
+        self.frontier_llm = LLM(
+            model="openai/auto",
+            base_url=freellm_base,
+            api_key=os.getenv("FREELLMAPI_KEY", "none"),
             temperature=0.2,
         )
 
-        # ── Local LLM: Qwen Coder 12B via Ollama ─────────────────────────────
-        self.local_llm = ChatOpenAI(
-            openai_api_base=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-            openai_api_key="ollama",
-            model_name="qwen2.5-coder:12b",
+        # Local LLM: Qwen Coder 12B via Ollama (coding)
+        self.local_llm = LLM(
+            model="ollama/qwen2.5-coder:12b",
+            base_url=ollama_base,
             temperature=0.1,
         )
 
-        # ── SML Router: local qwen2.5:0.5b, zero external calls ───────────────
+        # SML Router: local qwen2.5:0.5b, zero external calls
         self.router = SMLRouter(
             frontier_llm=self.frontier_llm,
             local_llm=self.local_llm,
         )
-
-    # ── Agents ────────────────────────────────────────────────────────────────
 
     @agent
     def senior_architect(self) -> Agent:
@@ -163,8 +154,6 @@ class CodingAgencyCrew():
             verbose=True,
         )
 
-    # ── Tasks ─────────────────────────────────────────────────────────────────
-
     @task
     def planning_task(self) -> Task:
         return Task(config=self.tasks_config['planning_task'])
@@ -180,8 +169,6 @@ class CodingAgencyCrew():
             output_file='report.md',
         )
 
-    # ── Crew + self-healing loop ───────────────────────────────────────────────
-
     @crew
     def crew(self) -> Crew:
         return Crew(
@@ -192,11 +179,6 @@ class CodingAgencyCrew():
         )
 
     def run_with_healing(self, inputs: dict) -> str:
-        """
-        Run the full pipeline with self-healing loop.
-        QA review feedback is injected back into the coding task
-        on each retry until LGTM or max iterations reached.
-        """
         iteration    = 0
         feedback     = ""
         final_result = None
@@ -208,27 +190,20 @@ class CodingAgencyCrew():
             print(f"{'='*60}")
 
             run_inputs = dict(inputs)
-            if feedback:
-                run_inputs["review_feedback"] = (
-                    f"\n\n--- Previous QA review found issues, fix them ---\n{feedback}"
-                )
-            else:
-                run_inputs.setdefault("review_feedback", "")
+            run_inputs["review_feedback"] = (
+                f"\n\n--- Previous QA review found issues, fix them ---\n{feedback}"
+                if feedback else ""
+            )
 
             result       = self.crew().kickoff(inputs=run_inputs)
             final_result = result
             output_text  = str(result).lower()
 
-            passed = any(
-                phrase in output_text
-                for phrase in ["lgtm", "no issues", "no errors", "approved", "passes all"]
-            )
-
-            if passed:
+            if any(p in output_text for p in ["lgtm", "no issues", "no errors", "approved", "passes all"]):
                 print(f"[Pipeline] ✅ QA passed on iteration {iteration}.")
                 break
-            else:
-                feedback = str(result)
-                print(f"[Pipeline] ⚠️  QA found issues — retrying ({iteration+1}/{self.MAX_REVIEW_ITERATIONS}).")
+
+            feedback = str(result)
+            print(f"[Pipeline] ⚠️  QA found issues — retrying ({iteration+1}/{self.MAX_REVIEW_ITERATIONS}).")
 
         return str(final_result)
