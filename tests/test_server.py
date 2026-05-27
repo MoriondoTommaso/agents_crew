@@ -1,7 +1,9 @@
 """
 Test suite for FastAPI server (v0.3 — single-pass pipeline).
 
-All tests mock crew_instance so no real LLM or Ollama is needed.
+All tests mock crew_instance directly on the server module so no real
+LLM or Ollama is needed. CodingAgencyCrew is NOT patched here because
+it is imported lazily inside the lifespan function, not at module level.
 
 Run with:
     uv run pytest tests/test_server.py -v
@@ -11,34 +13,32 @@ import os
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 import server as srv
 
 
 # ---------------------------------------------------------------------------
-# Shared fixture: TestClient with mocked crew_instance
+# Shared fixture: inject mock crew_instance directly on the module
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def client():
     mock_crew = MagicMock()
-    # run() is called in a thread via asyncio.to_thread — must return a plain string
     mock_crew.run.return_value = "def binary_search(): pass"
-    # plan_only / code_only use ad-hoc Crew instances — mock kickoff on them
-    mock_inner_crew = MagicMock()
-    mock_inner_crew.kickoff.return_value = "mocked output"
     mock_crew.senior_architect.return_value = MagicMock()
     mock_crew.senior_developer.return_value = MagicMock()
     mock_crew.planning_task.return_value = MagicMock()
     mock_crew.coding_task.return_value = MagicMock()
 
-    with patch("server.crew_instance", mock_crew), \
-         patch("server.CodingAgencyCrew", return_value=mock_crew):
-        with TestClient(srv.app, raise_server_exceptions=False) as c:
-            # Override crew_instance directly (lifespan may reset it)
-            srv.crew_instance = mock_crew
-            yield c
+    # Inject directly — CodingAgencyCrew is imported lazily inside lifespan,
+    # NOT at server module level, so patch("server.CodingAgencyCrew") would fail.
+    original = srv.crew_instance
+    srv.crew_instance = mock_crew
+    with TestClient(srv.app, raise_server_exceptions=False) as c:
+        srv.crew_instance = mock_crew  # re-inject in case lifespan reset it
+        yield c
+    srv.crew_instance = original
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +67,7 @@ class TestHealthAndInfo:
         assert "coding-agency" in ids
         assert "coding-code" in ids
         assert "coding-plan" in ids
-        # coding-review was removed in v0.3 (delegated to harness)
-        assert "coding-review" not in ids
+        assert "coding-review" not in ids  # removed in v0.3
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +117,6 @@ class TestNativeEndpoints:
         assert "result" in r.json()
 
     def test_review_endpoint_removed(self, client):
-        # /api/review was removed in v0.3 — review is delegated to the harness
         r = client.post("/api/review", json={
             "user_request": "review this code",
             "language": "Python",
@@ -164,7 +162,7 @@ class TestOAIEndpoint:
         assert r.status_code == 200
 
     def test_coding_review_model_falls_back_to_full_pipeline(self, client):
-        # coding-review no longer exists — unknown models fall back to full pipeline
+        # coding-review no longer exists — falls back to full pipeline
         r = self._chat(client, model="coding-review")
         assert r.status_code == 200
 
