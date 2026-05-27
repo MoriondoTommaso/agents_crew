@@ -1,25 +1,33 @@
 planning_task:
   description: >
-    Analyze the following requirement: {user_request}. 
-    Create a detailed technical design including class structures, 
-    method signatures, and logic flow.
+    Analyze the following requirement: {user_request}.
+    Create a detailed technical design including class structures,
+    method signatures, data models, and step-by-step logic flow.
+    Be explicit enough that a developer can implement without ambiguity.
   expected_output: >
-    A comprehensive technical design document in Markdown format.
+    A comprehensive technical design document in Markdown format,
+    including: overview, component breakdown, API contracts, and
+    pseudocode for non-trivial logic.
   agent: senior_architect
 
 coding_task:
   description: >
-    Using the technical design provided, implement the full solution in {language}. 
-    Ensure the code is modular and includes necessary documentation.
+    Using the technical design provided, implement the full solution in {language}.
+    Ensure the code is modular, includes docstrings, and handles edge cases.
+    {review_feedback}
   expected_output: >
-    The complete source code file, ready for execution.
+    The complete, executable source code file with inline documentation.
   agent: senior_developer
 
 review_task:
   description: >
-    Review the code for logical errors, security issues, and performance bottlenecks. 
-    If errors are found, provide the corrected version. 
-    Ensure all requirements from the original request are met.
+    Review the code for: logical errors, security vulnerabilities (injection,
+    auth bypass, unvalidated inputs), performance bottlenecks, and missing
+    edge case handling. Verify the code fully satisfies the original request.
+    If the code is correct, say 'LGTM' at the top of your response.
+    If issues are found, list them with severity (critical/major/minor)
+    and provide the corrected code snippets.
   expected_output: >
-    The final, polished version of the code and a brief summary of the checks performed.
+    Either 'LGTM — no issues found' or a structured review report
+    with corrected code snippets and a severity-tagged issue list.
   agent: qa_engineer
