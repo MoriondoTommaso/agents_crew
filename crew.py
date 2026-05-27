@@ -16,7 +16,6 @@ class TaskType(str, Enum):
 
 # ---------------------------------------------------------------------------
 # SML Router — fully local, zero API calls
-# Uses qwen2.5:0.5b via Ollama for intent classification
 # ---------------------------------------------------------------------------
 class SMLRouter:
     """
@@ -43,7 +42,6 @@ class SMLRouter:
         self.frontier_llm = frontier_llm
         self.local_llm    = local_llm
 
-        # Router: tiny local model, zero external calls
         self._router_llm = LLM(
             model="ollama/qwen2.5:0.5b",
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
@@ -52,11 +50,9 @@ class SMLRouter:
         )
 
     def classify(self, task_description: str, task_key: str | None = None) -> TaskType:
-        # 1. Fast path: hardcoded override
         if task_key and task_key in self._OVERRIDES:
             return self._OVERRIDES[task_key]
 
-        # 2. SML inference via local Ollama
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user",   "content": task_description[:512]},
@@ -97,25 +93,26 @@ class CodingAgencyCrew():
     MAX_REVIEW_ITERATIONS = 3
 
     def __init__(self) -> None:
-        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        ollama_base  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         freellm_base = os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1")
+        freellm_key  = os.getenv("FREELLMAPI_KEY", "none")
 
-        # Frontier LLM via FreeLLM (planning + review)
+        # FreeLLM exposes an OpenAI-compatible endpoint.
+        # LiteLLM needs a real model name string — we use gpt-4o as the
+        # canonical name; FreeLLM will map it to the best available model.
         self.frontier_llm = LLM(
-            model="openai/auto",
+            model="openai/gpt-4o",
             base_url=freellm_base,
-            api_key=os.getenv("FREELLMAPI_KEY", "none"),
+            api_key=freellm_key,
             temperature=0.2,
         )
 
-        # Local LLM: Qwen Coder 12B via Ollama (coding)
         self.local_llm = LLM(
             model="ollama/qwen2.5-coder:12b",
             base_url=ollama_base,
             temperature=0.1,
         )
 
-        # SML Router: local qwen2.5:0.5b, zero external calls
         self.router = SMLRouter(
             frontier_llm=self.frontier_llm,
             local_llm=self.local_llm,
@@ -195,9 +192,9 @@ class CodingAgencyCrew():
                 if feedback else ""
             )
 
-            result       = self.crew().kickoff(inputs=run_inputs)
+            result      = self.crew().kickoff(inputs=run_inputs)
             final_result = result
-            output_text  = str(result).lower()
+            output_text = str(result).lower()
 
             if any(p in output_text for p in ["lgtm", "no issues", "no errors", "approved", "passes all"]):
                 print(f"[Pipeline] ✅ QA passed on iteration {iteration}.")
