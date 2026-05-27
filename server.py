@@ -14,6 +14,7 @@ Start with:
 import os
 import time
 import uuid
+import json
 import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -22,6 +23,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
+from crewai import Crew, Process
 
 load_dotenv()
 
@@ -131,7 +133,6 @@ async def _stream_oai_response(content: str, model: str = "coding-agency") -> As
             "model":   model,
             "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
         }
-        import json
         yield f"data: {json.dumps(chunk)}\n\n"
         await asyncio.sleep(0)
 
@@ -189,7 +190,6 @@ async def plan_only(req: CodeRequest):
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
-    from crewai import Crew, Process
     inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
     result = await _run_with_timeout(
         lambda: str(Crew(
@@ -207,7 +207,6 @@ async def code_only(req: CodeRequest):
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
-    from crewai import Crew, Process
     inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
     result = await _run_with_timeout(
         lambda: str(Crew(
