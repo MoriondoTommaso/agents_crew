@@ -4,6 +4,8 @@ Test suite for FastAPI server (v0.3 — single-pass pipeline).
 All tests mock crew_instance directly on the server module so no real
 LLM or Ollama is needed. CodingAgencyCrew is NOT patched here because
 it is imported lazily inside the lifespan function, not at module level.
+Crew and Process ARE patchable via patch("server.Crew") because they
+are imported at module level in server.py.
 
 Run with:
     uv run pytest tests/test_server.py -v
@@ -19,7 +21,7 @@ import server as srv
 
 
 # ---------------------------------------------------------------------------
-# Shared fixture: inject mock crew_instance directly on the module
+# Shared fixture
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -31,12 +33,10 @@ def client():
     mock_crew.planning_task.return_value = MagicMock()
     mock_crew.coding_task.return_value = MagicMock()
 
-    # Inject directly — CodingAgencyCrew is imported lazily inside lifespan,
-    # NOT at server module level, so patch("server.CodingAgencyCrew") would fail.
     original = srv.crew_instance
     srv.crew_instance = mock_crew
     with TestClient(srv.app, raise_server_exceptions=False) as c:
-        srv.crew_instance = mock_crew  # re-inject in case lifespan reset it
+        srv.crew_instance = mock_crew
         yield c
     srv.crew_instance = original
 
@@ -67,7 +67,7 @@ class TestHealthAndInfo:
         assert "coding-agency" in ids
         assert "coding-code" in ids
         assert "coding-plan" in ids
-        assert "coding-review" not in ids  # removed in v0.3
+        assert "coding-review" not in ids
 
 
 # ---------------------------------------------------------------------------
@@ -93,10 +93,9 @@ class TestNativeEndpoints:
         assert "result" in r.json()
 
     def test_plan_endpoint(self, client):
-        with patch("server.Crew") as MockCrew:
-            mock_c = MagicMock()
-            mock_c.kickoff.return_value = "plan output"
-            MockCrew.return_value = mock_c
+        mock_inner = MagicMock()
+        mock_inner.kickoff.return_value = "plan output"
+        with patch("server.Crew", return_value=mock_inner):
             r = client.post("/api/plan", json={
                 "user_request": "design a cache system",
                 "language": "Python",
@@ -105,10 +104,9 @@ class TestNativeEndpoints:
         assert "result" in r.json()
 
     def test_code_endpoint(self, client):
-        with patch("server.Crew") as MockCrew:
-            mock_c = MagicMock()
-            mock_c.kickoff.return_value = "code output"
-            MockCrew.return_value = mock_c
+        mock_inner = MagicMock()
+        mock_inner.kickoff.return_value = "code output"
+        with patch("server.Crew", return_value=mock_inner):
             r = client.post("/api/code", json={
                 "user_request": "implement a stack",
                 "language": "Python",
@@ -146,23 +144,20 @@ class TestOAIEndpoint:
         assert r.status_code == 200
 
     def test_coding_code_model(self, client):
-        with patch("server.Crew") as MockCrew:
-            mock_c = MagicMock()
-            mock_c.kickoff.return_value = "code output"
-            MockCrew.return_value = mock_c
+        mock_inner = MagicMock()
+        mock_inner.kickoff.return_value = "code output"
+        with patch("server.Crew", return_value=mock_inner):
             r = self._chat(client, model="coding-code")
         assert r.status_code == 200
 
     def test_coding_plan_model(self, client):
-        with patch("server.Crew") as MockCrew:
-            mock_c = MagicMock()
-            mock_c.kickoff.return_value = "plan output"
-            MockCrew.return_value = mock_c
+        mock_inner = MagicMock()
+        mock_inner.kickoff.return_value = "plan output"
+        with patch("server.Crew", return_value=mock_inner):
             r = self._chat(client, model="coding-plan")
         assert r.status_code == 200
 
     def test_coding_review_model_falls_back_to_full_pipeline(self, client):
-        # coding-review no longer exists — falls back to full pipeline
         r = self._chat(client, model="coding-review")
         assert r.status_code == 200
 
