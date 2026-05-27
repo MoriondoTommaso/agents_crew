@@ -88,10 +88,14 @@ def _extract_user_request(messages: list[OAIMessage]) -> str:
     Extract the last user message as the coding request.
     Harnesses like Open-Claw send the full conversation history —
     we use only the last user turn as the active request.
+    Raises HTTP 422 if messages is empty.
     """
+    if not messages:
+        raise HTTPException(status_code=422, detail="messages list must not be empty")
     for msg in reversed(messages):
         if msg.role == "user":
             return msg.content
+    # No user message found — fall back to last message
     return messages[-1].content
 
 
@@ -127,7 +131,6 @@ def _oai_response(content: str, model: str = "coding-agency") -> dict:
 async def _stream_oai_response(content: str, model: str = "coding-agency") -> AsyncGenerator[str, None]:
     """Stream an OpenAI-compatible SSE response chunk by chunk."""
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    # Split into word-level chunks to simulate streaming
     words = content.split(" ")
     for i, word in enumerate(words):
         delta   = word + (" " if i < len(words) - 1 else "")
@@ -140,9 +143,8 @@ async def _stream_oai_response(content: str, model: str = "coding-agency") -> As
         }
         import json
         yield f"data: {json.dumps(chunk)}\n\n"
-        await asyncio.sleep(0)  # yield control to event loop
+        await asyncio.sleep(0)
 
-    # Final chunk
     yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -264,7 +266,7 @@ async def review_only(req: CodeRequest):
 async def list_models():
     """List the models in use — useful for harness introspection."""
     return {
-        "router":   "qwen2.5:0.5b (Ollama local)",
+        "router":   "qwen2.5:1.5b (Ollama local)",
         "planner":  "auto via FreeLLM (frontier)",
         "coder":    "qwen2.5-coder:12b (Ollama local)",
         "reviewer": "auto via FreeLLM (frontier)",
@@ -272,8 +274,7 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
-# OpenAI-compatible endpoint — for harness integration
-# (Open-Claw, Aider, Continue.dev, anything expecting /v1/chat/completions)
+# OpenAI-compatible endpoint
 # ---------------------------------------------------------------------------
 
 @app.get("/v1/models")
@@ -309,16 +310,15 @@ async def oai_chat_completions(
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
-    user_request = _extract_user_request(req.messages)
+    user_request = _extract_user_request(req.messages)  # raises 422 if empty
     language     = _parse_language_from_text(user_request)
 
     native_req = CodeRequest(
         user_request = user_request,
         language     = language,
-        healing      = req.model != "coding-code",  # no healing for single-step
+        healing      = req.model != "coding-code",
     )
 
-    # Route to the right pipeline based on model name
     if req.model == "coding-plan":
         resp = await plan_only(native_req)
         content = resp["result"]
@@ -328,7 +328,7 @@ async def oai_chat_completions(
     elif req.model == "coding-review":
         resp = await review_only(native_req)
         content = resp["result"]
-    else:  # coding-agency or any unknown model → full pipeline
+    else:
         code_resp = await run_pipeline(native_req)
         content   = code_resp.result
 

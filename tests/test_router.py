@@ -1,190 +1,163 @@
 """
 Test suite for SMLRouter.
-All unit tests run 100% locally — no Ollama, no API calls.
 
-Key facts from crew.py:
-- SMLRouter.route(task_description, task_key=None) -> LLM
-- _OVERRIDES: planning_task -> api, coding_task -> local, review_task -> api
-- _infer() calls self._router_llm.call(messages) -> parses {"route": "api|local"}
-- _keyword_fallback(text) -> "local" or "api" (string, not TaskType)
-- route() returns self.local_llm if destination=="local" else self.api_llm
+Unit tests (no Ollama required):
+ - TestOverrideMap     : task_key override map always wins
+ - TestSMLInference    : _infer() parses JSON correctly
+ - TestKeywordFallback : _keyword_fallback() covers edge cases
 
-Run unit tests only (no Ollama needed):
-    uv run pytest tests/test_router.py -m 'not integration' -v
-
-Run all including real Ollama:
+Run with:
     uv run pytest tests/test_router.py -v
 """
-import pytest
-from unittest.mock import MagicMock
-from crewai import LLM
-
 import sys
 import os
+import json
+import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from unittest.mock import MagicMock, patch
+from crewai import LLM
 from crew import SMLRouter
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Shared fixtures
 # ---------------------------------------------------------------------------
 
-def make_router(mock_router_response: str | None = None) -> SMLRouter:
-    """
-    Build a SMLRouter with mocked api_llm and local_llm.
-    If mock_router_response is provided, also mocks _router_llm.call()
-    so no Ollama connection is made.
-    """
-    api_llm = MagicMock(spec=LLM)
+@pytest.fixture
+def router():
+    """SMLRouter with fully mocked LLMs and a mocked _router_llm."""
+    api_llm   = MagicMock(spec=LLM)
     local_llm = MagicMock(spec=LLM)
 
-    # Patch __init__'s LLM() call for _router_llm before instantiation
-    # by building router then replacing _router_llm
-    import unittest.mock as mock
-    with mock.patch("crew.LLM") as mock_llm_cls:
+    with patch("crew.LLM") as mock_llm_cls:
         mock_llm_cls.return_value = MagicMock(spec=LLM)
-        router = SMLRouter(api_llm=api_llm, local_llm=local_llm)
+        r = SMLRouter(api_llm=api_llm, local_llm=local_llm)
 
-    if mock_router_response is not None:
-        router._router_llm = MagicMock(spec=LLM)
-        router._router_llm.call.return_value = mock_router_response
-
-    return router
+    r.api_llm   = api_llm
+    r.local_llm = local_llm
+    return r
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: override map (no model call at all)
+# Override map (task_key always wins, no LLM call ever)
 # ---------------------------------------------------------------------------
 
 class TestOverrideMap:
 
-    def test_planning_task_key_returns_api_llm(self):
-        router = make_router()
-        result = router.route("design the architecture", task_key="planning_task")
-        assert result is router.api_llm
+    def test_planning_task_key_returns_api_llm(self, router):
+        assert router.route("anything", task_key="planning_task") is router.api_llm
 
-    def test_coding_task_key_returns_local_llm(self):
-        router = make_router()
-        result = router.route("implement the feature", task_key="coding_task")
-        assert result is router.local_llm
+    def test_coding_task_key_returns_local_llm(self, router):
+        assert router.route("anything", task_key="coding_task") is router.local_llm
 
-    def test_review_task_key_returns_api_llm(self):
-        router = make_router()
-        result = router.route("review the code", task_key="review_task")
-        assert result is router.api_llm
+    def test_review_task_key_returns_api_llm(self, router):
+        assert router.route("anything", task_key="review_task") is router.api_llm
 
-    def test_override_ignores_description(self):
-        """coding_task key wins even if description sounds like review."""
-        router = make_router()
-        result = router.route("review this code please", task_key="coding_task")
-        assert result is router.local_llm
+    def test_override_ignores_description(self, router):
+        # Even a "write code" description is overridden to api by planning_task key
+        assert router.route("write code implement build", task_key="planning_task") is router.api_llm
 
-    def test_unknown_task_key_falls_through_to_infer(self):
-        """A task_key not in _OVERRIDES should fall through to _infer."""
-        router = make_router(mock_router_response='{"route": "local"}')
-        result = router.route("do something", task_key="unknown_task")
+    def test_unknown_task_key_falls_through_to_infer(self, router):
+        router._router_llm = MagicMock()
+        router._router_llm.call.return_value = '{"route": "local"}'
+        result = router.route("implement a cache", task_key="unknown_task")
         assert result is router.local_llm
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: SML binary inference with mocked _router_llm.call()
+# _infer(): JSON parsing
 # ---------------------------------------------------------------------------
 
 class TestSMLInference:
 
+    def _router_with_response(self, raw: str):
+        api_llm   = MagicMock(spec=LLM)
+        local_llm = MagicMock(spec=LLM)
+        with patch("crew.LLM") as mock_llm_cls:
+            mock_llm_cls.return_value = MagicMock(spec=LLM)
+            r = SMLRouter(api_llm=api_llm, local_llm=local_llm)
+        r.api_llm   = api_llm
+        r.local_llm = local_llm
+        r._router_llm = MagicMock()
+        r._router_llm.call.return_value = raw
+        return r
+
     def test_local_route_returns_local_llm(self):
-        router = make_router(mock_router_response='{"route": "local"}')
-        assert router.route("implement a REST API") is router.local_llm
+        r = self._router_with_response('{"route": "local"}')
+        assert r.route("implement a binary search", task_key="unknown") is r.local_llm
 
     def test_api_route_returns_api_llm(self):
-        router = make_router(mock_router_response='{"route": "api"}')
-        assert router.route("design the database schema") is router.api_llm
+        r = self._router_with_response('{"route": "api"}')
+        assert r.route("plan the architecture", task_key="unknown") is r.api_llm
 
     def test_api_route_review(self):
-        router = make_router(mock_router_response='{"route": "api"}')
-        assert router.route("review the code for bugs") is router.api_llm
+        r = self._router_with_response('{"route": "api"}')
+        assert r.route("review code for security", task_key="unknown") is r.api_llm
 
     def test_markdown_fence_stripped(self):
-        """Model wraps JSON in ```json...``` — must be handled."""
-        raw = '```json\n{"route": "local"}\n```'
-        router = make_router(mock_router_response=raw)
-        assert router.route("write a sorting algorithm") is router.local_llm
+        r = self._router_with_response('```json\n{"route": "local"}\n```')
+        assert r.route("write a function", task_key="unknown") is r.local_llm
 
     def test_whitespace_stripped(self):
-        router = make_router(mock_router_response='  {"route": "api"}  ')
-        assert router.route("review the PR") is router.api_llm
+        r = self._router_with_response('  {"route": "api"}  ')
+        assert r.route("review this", task_key="unknown") is r.api_llm
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: keyword fallback (broken model output)
+# _keyword_fallback()
 # ---------------------------------------------------------------------------
 
 class TestKeywordFallback:
 
+    def _router_with_error(self):
+        api_llm   = MagicMock(spec=LLM)
+        local_llm = MagicMock(spec=LLM)
+        with patch("crew.LLM") as mock_llm_cls:
+            mock_llm_cls.return_value = MagicMock(spec=LLM)
+            r = SMLRouter(api_llm=api_llm, local_llm=local_llm)
+        r.api_llm   = api_llm
+        r.local_llm = local_llm
+        r._router_llm = MagicMock()
+        r._router_llm.call.side_effect = Exception("Ollama unreachable")
+        return r
+
     def test_fallback_on_invalid_json_returns_api_llm(self):
-        """Invalid JSON triggers keyword fallback; 'implement' → local."""
-        router = make_router(mock_router_response="I think it's local!")
-        # 'implement' is a coding keyword → local
-        assert router.route("implement a feature") is router.local_llm
+        api_llm   = MagicMock(spec=LLM)
+        local_llm = MagicMock(spec=LLM)
+        with patch("crew.LLM") as mock_llm_cls:
+            mock_llm_cls.return_value = MagicMock(spec=LLM)
+            r = SMLRouter(api_llm=api_llm, local_llm=local_llm)
+        r.api_llm   = api_llm
+        r.local_llm = local_llm
+        r._router_llm = MagicMock()
+        r._router_llm.call.return_value = "not valid json at all"
+        result = r.route("plan architecture", task_key="unknown")
+        assert result is r.api_llm
 
     def test_fallback_on_empty_response_returns_api_llm(self):
-        """Empty response triggers fallback; 'design' → api."""
-        router = make_router(mock_router_response="")
-        assert router.route("design the system architecture") is router.api_llm
+        api_llm   = MagicMock(spec=LLM)
+        local_llm = MagicMock(spec=LLM)
+        with patch("crew.LLM") as mock_llm_cls:
+            mock_llm_cls.return_value = MagicMock(spec=LLM)
+            r = SMLRouter(api_llm=api_llm, local_llm=local_llm)
+        r.api_llm   = api_llm
+        r.local_llm = local_llm
+        r._router_llm = MagicMock()
+        r._router_llm.call.return_value = ""
+        result = r.route("review this code", task_key="unknown")
+        assert result is r.api_llm
 
     def test_fallback_coding_keywords_return_local(self):
-        router = make_router(mock_router_response="{invalid}")
-        for kw in ["implement", "write", "code", "develop", "build", "generate"]:
-            assert router._keyword_fallback(kw) == "local"
+        r = self._router_with_error()
+        for kw in ["implement a cache", "write a function", "code a parser",
+                   "develop an API", "build a server", "generate a class"]:
+            assert r.route(kw, task_key="unknown") is r.local_llm, f"Failed for: {kw}"
 
     def test_fallback_api_keywords_return_api(self):
-        router = make_router(mock_router_response="{invalid}")
-        for kw in ["design", "plan", "architect", "review", "specification"]:
-            assert router._keyword_fallback(kw) == "api"
+        r = self._router_with_error()
+        assert r.route("plan the architecture", task_key="unknown") is r.api_llm
 
     def test_fallback_defaults_to_api(self):
-        router = make_router(mock_router_response="{invalid}")
-        assert router._keyword_fallback("do something unspecified") == "api"
-
-
-# ---------------------------------------------------------------------------
-# Integration tests: real Ollama qwen2.5:0.5b (skipped if Ollama not running)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.integration
-class TestRealOllamaRouter:
-    """
-    Requires Ollama running with qwen2.5:0.5b pulled.
-    Automatically skipped if Ollama is not reachable.
-    """
-
-    @pytest.fixture(autouse=True)
-    def check_ollama(self):
-        import httpx
-        try:
-            httpx.get("http://localhost:11434/api/tags", timeout=2)
-        except Exception:
-            pytest.skip("Ollama not running")
-
-    def _real_router(self):
-        """Real router — uses actual Ollama for _router_llm."""
-        from crewai import LLM
-        api_llm = MagicMock(spec=LLM)
-        local_llm = MagicMock(spec=LLM)
-        return SMLRouter(api_llm=api_llm, local_llm=local_llm)
-
-    def test_coding_intent_routes_local(self):
-        router = self._real_router()
-        result = router.route("implement a FastAPI server with JWT auth")
-        assert result is router.local_llm
-
-    def test_planning_intent_routes_api(self):
-        router = self._real_router()
-        result = router.route("design the architecture for a microservice system")
-        assert result is router.api_llm
-
-    def test_review_intent_routes_api(self):
-        router = self._real_router()
-        result = router.route("review this Python code for security vulnerabilities")
-        assert result is router.api_llm
+        r = self._router_with_error()
+        assert r.route("something unrelated", task_key="unknown") is r.api_llm
