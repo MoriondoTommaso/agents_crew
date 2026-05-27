@@ -15,72 +15,76 @@ class TaskType(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# SML Router — fully local, zero API calls
+# SML Router
+# Binary decision: API (FreeLLM picks the model) vs LOCAL (qwen2.5-coder:12b)
 # ---------------------------------------------------------------------------
 class SMLRouter:
     """
-    Small-Model Router: classifies a task description into one of
-    [planning, coding, review] using a local 0.5B model.
-    No API calls, <100ms latency on Apple Silicon.
+    Routes tasks to either:
+      - api_llm  : FreeLLM endpoint (planning + review) — FreeLLM picks the model
+      - local_llm: Ollama qwen2.5-coder:12b (coding)   — zero API consumption
+
+    The router itself uses qwen2.5:0.5b locally — no external calls ever.
     """
 
     SYSTEM_PROMPT = (
-        "You are a routing classifier for a coding agent pipeline. "
-        "Given a task description, output ONLY a raw JSON object with a "
-        "single key 'task_type' whose value is one of: "
-        "'planning', 'coding', 'review'. "
-        "No explanation, no markdown, just the JSON."
+        "You are a routing classifier. "
+        "Given a task description, reply with ONLY a JSON object: "
+        '{"route": "api"} if the task requires reasoning, planning, architecture, '
+        'or code review. Reply {"route": "local"} if the task requires writing, '
+        "implementing, or generating code. No explanation, no markdown."
     )
 
-    _OVERRIDES: dict[str, TaskType] = {
-        "planning_task": TaskType.PLANNING,
-        "coding_task":   TaskType.CODING,
-        "review_task":   TaskType.REVIEW,
+    _OVERRIDES: dict[str, str] = {
+        "planning_task": "api",
+        "coding_task":   "local",
+        "review_task":   "api",
     }
 
-    def __init__(self, frontier_llm: LLM, local_llm: LLM):
-        self.frontier_llm = frontier_llm
-        self.local_llm    = local_llm
+    def __init__(self, api_llm: LLM, local_llm: LLM):
+        self.api_llm   = api_llm
+        self.local_llm = local_llm
 
         self._router_llm = LLM(
             model="ollama/qwen2.5:0.5b",
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             temperature=0.0,
-            max_tokens=32,
+            max_tokens=16,
         )
 
-    def classify(self, task_description: str, task_key: str | None = None) -> TaskType:
-        if task_key and task_key in self._OVERRIDES:
-            return self._OVERRIDES[task_key]
-
+    def _infer(self, task_description: str) -> str:
+        """Ask the local 0.5B model: 'api' or 'local'?"""
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user",   "content": task_description[:512]},
         ]
         try:
-            response = self._router_llm.call(messages)
-            raw = response.strip().replace("```json", "").replace("```", "").strip()
-            payload = json.loads(raw)
-            return TaskType(payload["task_type"])
+            raw = self._router_llm.call(messages)
+            raw = raw.strip().replace("```json", "").replace("```", "").strip()
+            return json.loads(raw)["route"]  # "api" or "local"
         except Exception as e:
-            print(f"[SMLRouter] Inference fallback triggered: {e}")
+            print(f"[SMLRouter] Fallback triggered: {e}")
             return self._keyword_fallback(task_description)
 
-    def _keyword_fallback(self, text: str) -> TaskType:
+    def _keyword_fallback(self, text: str) -> str:
         t = text.lower()
-        if any(w in t for w in ["design", "plan", "architect", "specification", "requirement"]):
-            return TaskType.PLANNING
-        if any(w in t for w in ["implement", "write", "code", "develop", "build"]):
-            return TaskType.CODING
-        return TaskType.REVIEW
+        if any(w in t for w in ["implement", "write", "code", "develop", "build", "generate"]):
+            return "local"
+        return "api"
 
     def route(self, task_description: str, task_key: str | None = None) -> LLM:
-        task_type = self.classify(task_description, task_key)
-        emoji = {TaskType.PLANNING: "📐", TaskType.CODING: "💻", TaskType.REVIEW: "🔍"}
-        print(f"[SMLRouter] '{task_key or 'dynamic'}' → {emoji[task_type]} {task_type.value}")
-        if task_type == TaskType.CODING:
-            return self.local_llm
-        return self.frontier_llm
+        """Return the right LLM. Override map is always checked first."""
+        # 1. Hardcoded override for known task keys (no model call)
+        if task_key and task_key in self._OVERRIDES:
+            destination = self._OVERRIDES[task_key]
+        else:
+            # 2. SML inference for dynamic tasks
+            destination = self._infer(task_description)
+
+        icons = {"api": "🌐", "local": "💻"}
+        print(f"[SMLRouter] '{task_key or 'dynamic'}' → {icons[destination]} {destination}")
+
+        return self.local_llm if destination == "local" else self.api_llm
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +92,7 @@ class SMLRouter:
 # ---------------------------------------------------------------------------
 @CrewBase
 class CodingAgencyCrew():
-    """Hybrid Coding Agency Crew — fully local SML router, zero routing API calls."""
+    """Hybrid Coding Agency Crew — binary api/local routing via local SML."""
 
     MAX_REVIEW_ITERATIONS = 3
 
@@ -97,16 +101,16 @@ class CodingAgencyCrew():
         freellm_base = os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1")
         freellm_key  = os.getenv("FREELLMAPI_KEY", "none")
 
-        # FreeLLM exposes an OpenAI-compatible endpoint.
-        # LiteLLM needs a real model name string — we use gpt-4o as the
-        # canonical name; FreeLLM will map it to the best available model.
-        self.frontier_llm = LLM(
+        # API LLM: FreeLLM proxy — it picks the best available model automatically.
+        # We pass gpt-4o as a canonical name; FreeLLM ignores it and routes freely.
+        self.api_llm = LLM(
             model="openai/gpt-4o",
             base_url=freellm_base,
             api_key=freellm_key,
             temperature=0.2,
         )
 
+        # Local LLM: Qwen Coder 12B — heavy lifting, zero API consumption.
         self.local_llm = LLM(
             model="ollama/qwen2.5-coder:12b",
             base_url=ollama_base,
@@ -114,7 +118,7 @@ class CodingAgencyCrew():
         )
 
         self.router = SMLRouter(
-            frontier_llm=self.frontier_llm,
+            api_llm=self.api_llm,
             local_llm=self.local_llm,
         )
 
@@ -192,9 +196,9 @@ class CodingAgencyCrew():
                 if feedback else ""
             )
 
-            result      = self.crew().kickoff(inputs=run_inputs)
+            result       = self.crew().kickoff(inputs=run_inputs)
             final_result = result
-            output_text = str(result).lower()
+            output_text  = str(result).lower()
 
             if any(p in output_text for p in ["lgtm", "no issues", "no errors", "approved", "passes all"]):
                 print(f"[Pipeline] ✅ QA passed on iteration {iteration}.")
