@@ -25,9 +25,7 @@ class PipelineMode(str, Enum):
     HYBRID  (default) — SMLRouter decides task-by-task:
                         planning/review → api_llm, coding → local_llm
     API     — every task goes to the frontier API (no Ollama needed).
-              Useful when Ollama is unavailable or when you want max quality.
     LOCAL   — every task goes to the local Ollama model (zero API spend).
-              Useful for offline work, cost control, or privacy.
     """
     HYBRID = "hybrid"
     API    = "api"
@@ -54,15 +52,12 @@ class SMLRouter:
     """
     Routes tasks to either:
       - api_llm   : FreeLLM endpoint (planning + review)
-      - local_llm : Ollama qwen2.5-coder:12b (coding)
+      - local_llm : Ollama coder model (coding)
 
     Routing behaviour is controlled by PIPELINE_MODE:
       hybrid  → SMLRouter decides per-task (default)
-      api     → always api_llm, router LLM never called
-      local   → always local_llm, router LLM never called
-
-    When mode is 'hybrid', the router itself uses qwen2.5:1.5b locally
-    — no external API calls ever during routing.
+      api     → always api_llm
+      local   → always local_llm
     """
 
     SYSTEM_PROMPT = (
@@ -79,9 +74,7 @@ class SMLRouter:
         "review_task":   "api",
     }
 
-    # API-bound keywords take priority — matched before _LOCAL_KEYWORDS.
-    # A task like "review this code" should go to api, not local.
-    _API_KEYWORDS = {"review", "plan", "design", "architect", "analyse", "analyze", "audit", "evaluate"}
+    _API_KEYWORDS   = {"review", "plan", "design", "architect", "analyse", "analyze", "audit", "evaluate"}
     _LOCAL_KEYWORDS = {"implement", "write", "code", "develop", "build", "generate", "create"}
 
     def __init__(self, api_llm: LLM, local_llm: LLM, mode: PipelineMode) -> None:
@@ -89,19 +82,15 @@ class SMLRouter:
         self.local_llm = local_llm
         self.mode      = mode
 
-        # Only instantiate the router LLM when we actually need it (hybrid mode)
         self._router_llm: LLM | None = None
         if mode == PipelineMode.HYBRID:
+            router_model = os.getenv("OLLAMA_ROUTER_MODEL", "qwen2.5:1.5b")
             self._router_llm = LLM(
-                model="ollama/qwen2.5:1.5b",
+                model=f"ollama/{router_model}",
                 base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
                 temperature=0.0,
                 max_tokens=16,
             )
-
-    # ------------------------------------------------------------------
-    # Internal helpers (hybrid mode only)
-    # ------------------------------------------------------------------
 
     def _infer(self, task_description: str) -> str:
         messages = [
@@ -118,15 +107,8 @@ class SMLRouter:
 
     def _keyword_fallback(self, text: str) -> str:
         """
-        Keyword-based fallback router used when the LLM router is unavailable.
-
-        Priority order (first match wins):
-          1. _API_KEYWORDS  — review / plan / design / ... → api
-          2. _LOCAL_KEYWORDS — write / implement / code / ... → local
-          3. default → api
-
-        API keywords are checked first so that "review this Python code"
-        routes to api despite the word "code" being present.
+        API keywords checked first so 'review this Python code' → api,
+        not local (despite 'code' being in _LOCAL_KEYWORDS).
         """
         words = set(text.lower().split())
         if words & self._API_KEYWORDS:
@@ -135,30 +117,17 @@ class SMLRouter:
             return "local"
         return "api"
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def route(self, task_description: str, task_key: str | None = None) -> LLM:
-        """
-        Return the LLM instance to use for the given task.
-
-        Short-circuits immediately for non-hybrid modes so the router
-        LLM is never instantiated or called.
-        """
         icons = {"api": "🌐", "local": "💻"}
 
-        # --- PIPELINE_MODE=api: always use frontier API ---
         if self.mode == PipelineMode.API:
             print(f"[SMLRouter] mode=api → 🌐 api (all tasks)")
             return self.api_llm
 
-        # --- PIPELINE_MODE=local: always use local Ollama ---
         if self.mode == PipelineMode.LOCAL:
             print(f"[SMLRouter] mode=local → 💻 local (all tasks)")
             return self.local_llm
 
-        # --- PIPELINE_MODE=hybrid: let the router decide ---
         if task_key and task_key in self._OVERRIDES:
             destination = self._OVERRIDES[task_key]
         else:
@@ -176,31 +145,27 @@ class CodingAgencyCrew():
     """
     Hybrid Coding Agency Crew — single-pass pipeline.
 
-    Default (PIPELINE_MODE=hybrid):  plan (api) → code (local) → output
+    Default (PIPELINE_MODE=hybrid):  plan (api) → code (local)
     API mode  (PIPELINE_MODE=api):   plan (api) → code (api)
     Local mode(PIPELINE_MODE=local): plan (local) → code (local)
 
-    Set PIPELINE_MODE in your .env file:
-      PIPELINE_MODE=hybrid   # SMLRouter decides per-task (default)
-      PIPELINE_MODE=api      # all tasks → frontier LLM, no Ollama needed
-      PIPELINE_MODE=local    # all tasks → Ollama, zero API spend
-
-    No internal self-healing loop: if used with an agentic harness
-    (Open-Claw, Aider, Continue.dev), the harness handles iteration
-    with real code execution tools — far more reliable than LLM-only review.
+    Environment variables:
+      PIPELINE_MODE        hybrid | api | local  (default: hybrid)
+      OLLAMA_CODER_MODEL   coder model name      (default: qwen2.5-coder:14b)
+      OLLAMA_ROUTER_MODEL  router model name     (default: qwen2.5:1.5b)
     """
 
-    # Lock prevents concurrent requests from sharing CrewAI instance state
     _lock = threading.Lock()
 
     def __init__(self) -> None:
-        ollama_base  = os.getenv("OLLAMA_BASE_URL",  "http://localhost:11434")
-        freellm_base = os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1")
-        freellm_key  = os.getenv("FREELLMAPI_KEY",   "none")
-        llm_timeout  = int(os.getenv("LLM_TIMEOUT_SEC", "600"))
+        ollama_base  = os.getenv("OLLAMA_BASE_URL",      "http://localhost:11434")
+        freellm_base = os.getenv("FREELLM_BASE_URL",     "http://localhost:3001/v1")
+        freellm_key  = os.getenv("FREELLMAPI_KEY",       "none")
+        llm_timeout  = int(os.getenv("LLM_TIMEOUT_SEC",  "600"))
+        coder_model  = os.getenv("OLLAMA_CODER_MODEL",   "qwen2.5-coder:14b")
         mode         = PipelineMode.from_env()
 
-        print(f"[CodingAgencyCrew] PIPELINE_MODE={mode.value}")
+        print(f"[CodingAgencyCrew] PIPELINE_MODE={mode.value}  coder={coder_model}")
 
         self.api_llm = LLM(
             model="openai/gpt-4o",
@@ -211,7 +176,7 @@ class CodingAgencyCrew():
         )
 
         self.local_llm = LLM(
-            model="ollama/qwen2.5-coder:12b",
+            model=f"ollama/{coder_model}",
             base_url=ollama_base,
             temperature=0.1,
             timeout=llm_timeout,
