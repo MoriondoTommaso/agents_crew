@@ -37,7 +37,7 @@ uv sync
 cp .env.example .env
 # edit .env with your FreeLLM endpoint and key
 
-# 3. Pull models
+# 3. Pull Ollama models (required only for PIPELINE_MODE=hybrid or local)
 ollama pull qwen2.5-coder:12b
 ollama pull qwen2.5:1.5b
 
@@ -127,6 +127,34 @@ curl http://localhost:8000/v1/chat/completions \
 | `GET` | `/api/models` | Active model info |
 | `GET` | `/v1/models` | OAI-compatible model list |
 
+## PIPELINE_MODE
+
+Set `PIPELINE_MODE` in your `.env` to control routing behaviour without touching code:
+
+| Value | Behaviour | When to use |
+|---|---|---|
+| `hybrid` *(default)* | SMLRouter decides per-task: planning/review → API, coding → local | Normal use — best cost/quality balance |
+| `api` | All tasks → frontier LLM, Ollama not needed | Ollama unavailable, max quality needed |
+| `local` | All tasks → Ollama, zero API spend | Offline work, cost control, privacy |
+
+```bash
+# In .env:
+PIPELINE_MODE=hybrid   # default
+PIPELINE_MODE=api      # no Ollama needed
+PIPELINE_MODE=local    # no API needed
+```
+
+### SMLRouter keyword fallback
+
+When the router LLM (`qwen2.5:1.5b`) is unreachable, the router falls back to keyword matching.  
+Priority order — **first match wins**:
+
+1. **API keywords** (review, plan, design, architect, analyse, audit, evaluate) → `api`
+2. **Local keywords** (write, implement, code, develop, build, generate, create) → `local`
+3. **Default** → `api`
+
+API keywords are checked first, so `"review this Python code"` correctly routes to `api` despite containing the word `code`.
+
 ## Harness Integration
 
 ### Open-Claw
@@ -168,6 +196,7 @@ All settings via `.env` (see `.env.example`):
 
 | Variable | Default | Description |
 |---|---|---|
+| `PIPELINE_MODE` | `hybrid` | Routing mode: `hybrid` / `api` / `local` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint |
 | `FREELLM_BASE_URL` | `http://localhost:3001/v1` | FreeLLM endpoint |
 | `FREELLMAPI_KEY` | `none` | FreeLLM API key |
@@ -175,12 +204,40 @@ All settings via `.env` (see `.env.example`):
 
 > **Tip:** If your harness has a 120s timeout, set `LLM_TIMEOUT_SEC=110` so the server returns a clean 504 before the harness drops the connection.
 
+## Testing
+
+```bash
+# Unit tests only (no server or Ollama needed)
+uv run python test_pipeline.py
+
+# Full integration tests (start the server first)
+make up   # or: uv run uvicorn server:app --reload
+uv run python test_pipeline.py
+
+# Quick mode — only health check + full pipeline
+QUICK=1 uv run python test_pipeline.py
+
+# Against a custom host
+BASE_URL=http://192.168.1.10:8000 uv run python test_pipeline.py
+```
+
+### What the smoke test covers
+
+| Test | Requires server | What it checks |
+|---|---|---|
+| routing keyword fallback | ✗ | `_keyword_fallback()` routes 6 tasks correctly |
+| PIPELINE_MODE env parsing | ✗ | `from_env()` handles all values + invalid fallback |
+| health check | ✓ | `GET /health` returns `crew_ready: true` |
+| model list | ✓ | `/v1/models` lists all 3 model ids |
+| plan only | ✓ | `/api/plan` returns a non-trivial plan |
+| code only | ✓ | `/api/code` returns Python with `def` |
+| full pipeline | ✓ | `/api/run` returns result + elapsed + request_id |
+| OAI full / plan / code | ✓ | OAI-compat format correct for each model |
+| streaming | ✓ | SSE chunks assemble to non-empty string |
+
 ## Development
 
 ```bash
-# Run tests (no Ollama or API needed — all mocked)
-uv run pytest tests/ -v
-
 # Lint
 uv run ruff check .
 ```
@@ -189,14 +246,12 @@ uv run ruff check .
 
 ```
 agents_crew/
-├── server.py          # FastAPI app + OpenAI-compatible endpoints
-├── crew.py            # CodingAgencyCrew + SMLRouter
+├── server.py           # FastAPI app + OpenAI-compatible endpoints
+├── crew.py             # CodingAgencyCrew + SMLRouter
+├── test_pipeline.py    # End-to-end smoke test (unit + integration)
 ├── config/
-│   ├── agents.yaml    # Agent definitions
-│   └── tasks.yaml     # Task definitions
-├── tests/
-│   ├── test_router.py # SMLRouter unit tests
-│   └── test_server.py # FastAPI endpoint tests
+│   ├── agents.yaml     # Agent definitions
+│   └── tasks.yaml      # Task definitions
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example
