@@ -1,7 +1,9 @@
 # docker-compose.yml
 # Full coding agent stack:
-#   openclaw  — agentic harness (CLI, interactive terminal)
-#   coding-agency — FastAPI SML router (plan → code)
+#
+#   coding-agency  — FastAPI SML router (plan → code), port 8000
+#   mcp-server     — MCP tool server (filesystem + GitHub), port 8001
+#   openclaw       — agentic harness (CLI, interactive terminal)
 #
 # Ollama stays on the host — reached via host.docker.internal.
 #
@@ -13,6 +15,7 @@
 
 services:
 
+  # ── 1. Coding Agency server ───────────────────────────────────────────────
   coding-agency:
     build:
       context: .
@@ -35,6 +38,34 @@ services:
       retries: 3
       start_period: 15s
 
+  # ── 2. MCP tool server ────────────────────────────────────────────────────
+  mcp-server:
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile
+    image: mcp-server:latest
+    container_name: mcp-server
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      WORKSPACE_ROOT: /workspace
+      GITHUB_TOKEN:   ${GITHUB_TOKEN:-}
+      GITHUB_OWNER:   ${GITHUB_OWNER:-}
+      GITHUB_REPO:    ${GITHUB_REPO:-}
+    volumes:
+      # Mount project root as /workspace (read-write)
+      - .:/workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ── 3. Open-Claw harness ──────────────────────────────────────────────────
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     container_name: openclaw
@@ -43,20 +74,21 @@ services:
     depends_on:
       coding-agency:
         condition: service_healthy
+      mcp-server:
+        condition: service_healthy
     volumes:
-      # Mount our pre-built config so openclaw picks it up on first run
+      # Pre-built config (model list + MCP server reference)
       - ./openclaw/openclaw.json:/root/.openclaw/openclaw.json:ro
-      # Mount the system prompt override
+      # System prompt override
       - ./openclaw/system-prompt.md:/root/.openclaw/system-prompt.md:ro
-      # Persist OpenClaw session data (conversations, cache) across restarts
+      # Persist Open-Claw session data across restarts
       - openclaw-data:/root/.openclaw/data
-      # Mount the project root read-write so the agent can read/write code
+      # Project workspace (read-write so the agent can read/write code)
       - .:/workspace
     working_dir: /workspace
     environment:
-      # Tell openclaw where the router is (internal Docker network)
       OPENCLAW_API_BASE: http://coding-agency:8000/v1
-      OPENCLAW_MODEL: coding-agency
+      OPENCLAW_MODEL:    coding-agency
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
