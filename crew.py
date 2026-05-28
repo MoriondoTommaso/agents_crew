@@ -11,8 +11,40 @@ from enum import Enum
 # ---------------------------------------------------------------------------
 class TaskType(str, Enum):
     PLANNING = "planning"
-    CODING   = "coding"
-    REVIEW   = "review"
+    CODING = "coding"
+    REVIEW = "review"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline mode
+# ---------------------------------------------------------------------------
+class PipelineMode(str, Enum):
+    """
+    Controls which LLM backend(s) the SMLRouter is allowed to use.
+
+    HYBRID  (default) — SMLRouter decides task-by-task:
+                        planning/review → api_llm, coding → local_llm
+    API     — every task goes to the frontier API (no Ollama needed).
+              Useful when Ollama is unavailable or when you want max quality.
+    LOCAL   — every task goes to the local Ollama model (zero API spend).
+              Useful for offline work, cost control, or privacy.
+    """
+    HYBRID = "hybrid"
+    API    = "api"
+    LOCAL  = "local"
+
+    @classmethod
+    def from_env(cls) -> "PipelineMode":
+        raw = os.getenv("PIPELINE_MODE", "hybrid").strip().lower()
+        try:
+            return cls(raw)
+        except ValueError:
+            valid = [m.value for m in cls]
+            print(
+                f"[PipelineMode] Unknown value '{raw}' in PIPELINE_MODE. "
+                f"Valid options: {valid}. Falling back to 'hybrid'."
+            )
+            return cls.HYBRID
 
 
 # ---------------------------------------------------------------------------
@@ -21,10 +53,16 @@ class TaskType(str, Enum):
 class SMLRouter:
     """
     Routes tasks to either:
-    - api_llm  : FreeLLM endpoint (planning + review)
-    - local_llm: Ollama qwen2.5-coder:12b (coding)
+      - api_llm   : FreeLLM endpoint (planning + review)
+      - local_llm : Ollama qwen2.5-coder:12b (coding)
 
-    The router itself uses qwen2.5:1.5b locally — no external calls ever.
+    Routing behaviour is controlled by PIPELINE_MODE:
+      hybrid  → SMLRouter decides per-task (default)
+      api     → always api_llm, router LLM never called
+      local   → always local_llm, router LLM never called
+
+    When mode is 'hybrid', the router itself uses qwen2.5:1.5b locally
+    — no external API calls ever during routing.
     """
 
     SYSTEM_PROMPT = (
@@ -43,16 +81,24 @@ class SMLRouter:
 
     _LOCAL_KEYWORDS = {"implement", "write", "code", "develop", "build", "generate", "create"}
 
-    def __init__(self, api_llm: LLM, local_llm: LLM):
+    def __init__(self, api_llm: LLM, local_llm: LLM, mode: PipelineMode) -> None:
         self.api_llm   = api_llm
         self.local_llm = local_llm
+        self.mode      = mode
 
-        self._router_llm = LLM(
-            model="ollama/qwen2.5:1.5b",
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            temperature=0.0,
-            max_tokens=16,
-        )
+        # Only instantiate the router LLM when we actually need it (hybrid mode)
+        self._router_llm: LLM | None = None
+        if mode == PipelineMode.HYBRID:
+            self._router_llm = LLM(
+                model="ollama/qwen2.5:1.5b",
+                base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+                temperature=0.0,
+                max_tokens=16,
+            )
+
+    # ------------------------------------------------------------------
+    # Internal helpers (hybrid mode only)
+    # ------------------------------------------------------------------
 
     def _infer(self, task_description: str) -> str:
         messages = [
@@ -60,7 +106,7 @@ class SMLRouter:
             {"role": "user",   "content": task_description[:512]},
         ]
         try:
-            raw = self._router_llm.call(messages)
+            raw = self._router_llm.call(messages)  # type: ignore[union-attr]
             raw = raw.strip().replace("```json", "").replace("```", "").strip()
             return json.loads(raw)["route"]
         except Exception as e:
@@ -73,13 +119,35 @@ class SMLRouter:
             return "local"
         return "api"
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def route(self, task_description: str, task_key: str | None = None) -> LLM:
+        """
+        Return the LLM instance to use for the given task.
+
+        Short-circuits immediately for non-hybrid modes so the router
+        LLM is never instantiated or called.
+        """
+        icons = {"api": "🌐", "local": "💻"}
+
+        # --- PIPELINE_MODE=api: always use frontier API ---
+        if self.mode == PipelineMode.API:
+            print(f"[SMLRouter] mode=api → 🌐 api (all tasks)")
+            return self.api_llm
+
+        # --- PIPELINE_MODE=local: always use local Ollama ---
+        if self.mode == PipelineMode.LOCAL:
+            print(f"[SMLRouter] mode=local → 💻 local (all tasks)")
+            return self.local_llm
+
+        # --- PIPELINE_MODE=hybrid: let the router decide ---
         if task_key and task_key in self._OVERRIDES:
             destination = self._OVERRIDES[task_key]
         else:
             destination = self._infer(task_description)
 
-        icons = {"api": "🌐", "local": "💻"}
         print(f"[SMLRouter] '{task_key or 'dynamic'}' → {icons[destination]} {destination}")
         return self.local_llm if destination == "local" else self.api_llm
 
@@ -92,7 +160,14 @@ class CodingAgencyCrew():
     """
     Hybrid Coding Agency Crew — single-pass pipeline.
 
-    plan (api) → code (local) → output
+    Default (PIPELINE_MODE=hybrid):  plan (api) → code (local) → output
+    API mode  (PIPELINE_MODE=api):   plan (api) → code (api)
+    Local mode(PIPELINE_MODE=local): plan (local) → code (local)
+
+    Set PIPELINE_MODE in your .env file:
+      PIPELINE_MODE=hybrid   # SMLRouter decides per-task (default)
+      PIPELINE_MODE=api      # all tasks → frontier LLM, no Ollama needed
+      PIPELINE_MODE=local    # all tasks → Ollama, zero API spend
 
     No internal self-healing loop: if used with an agentic harness
     (Open-Claw, Aider, Continue.dev), the harness handles iteration
@@ -107,6 +182,9 @@ class CodingAgencyCrew():
         freellm_base = os.getenv("FREELLM_BASE_URL", "http://localhost:3001/v1")
         freellm_key  = os.getenv("FREELLMAPI_KEY",   "none")
         llm_timeout  = int(os.getenv("LLM_TIMEOUT_SEC", "600"))
+        mode         = PipelineMode.from_env()
+
+        print(f"[CodingAgencyCrew] PIPELINE_MODE={mode.value}")
 
         self.api_llm = LLM(
             model="openai/gpt-4o",
@@ -126,6 +204,7 @@ class CodingAgencyCrew():
         self.router = SMLRouter(
             api_llm=self.api_llm,
             local_llm=self.local_llm,
+            mode=mode,
         )
 
     @agent
