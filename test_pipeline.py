@@ -32,8 +32,11 @@ import os
 import sys
 import time
 import json
+import types
 import textwrap
-from typing import Any
+import importlib
+import importlib.util
+import pathlib
 
 try:
     import requests
@@ -41,27 +44,35 @@ except ImportError:
     print("[error] 'requests' not found. Run: uv add --dev requests")
     sys.exit(1)
 
-# ── config ────────────────────────────────────────────────────────────────────────
+# ── config ──────────────────────────────────────────────────────────────────────
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
 QUICK    = os.getenv("QUICK", "0") == "1"
 TIMEOUT  = int(os.getenv("REQUEST_TIMEOUT", "120"))  # per-request timeout (s)
 
-# Simple task that exercises both planning and coding but is fast to execute
 TEST_TASK = (
     "Write a Python function called `fibonacci(n: int) -> list[int]` that returns "
     "the first n Fibonacci numbers. Include type hints and a one-line docstring."
 )
 
-# ── colours ───────────────────────────────────────────────────────────────────────
+# ── colours ─────────────────────────────────────────────────────────────────────
 GRN  = "\033[32m"; RED  = "\033[31m"; YEL  = "\033[33m"
 CYN  = "\033[36m"; GRY  = "\033[90m"; BLD  = "\033[1m";  RST  = "\033[0m"
+
+# ── helpers ──────────────────────────────────────────────────────────────────────
+
+def _load_crew_module() -> types.ModuleType:
+    """Load crew.py as a fresh module without importing it into sys.modules."""
+    spec = importlib.util.spec_from_file_location("crew_under_test", pathlib.Path("crew.py"))
+    assert spec and spec.loader, "Could not find crew.py in the current directory."
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
 
 # ── test runner ──────────────────────────────────────────────────────────────────
 
 results: list[dict] = []
 
 def run_test(name: str, fn) -> bool:
-    """Execute a test function, capture result, print inline."""
     print(f"  {GRY}running{RST}  {name} ...", end="", flush=True)
     start = time.time()
     try:
@@ -98,7 +109,7 @@ def print_result_box(content: str, label: str = "output", max_lines: int = 20) -
     print(f"     {GRY}└───────────────────────────────────────────────────────────────{RST}")
 
 
-# ── individual tests ──────────────────────────────────────────────────────────────────
+# ── individual tests ─────────────────────────────────────────────────────────────
 
 def test_health():
     r = requests.get(f"{BASE_URL}/health", timeout=10)
@@ -241,9 +252,9 @@ def test_streaming():
           f"{GRY}assembled:{RST} '{assembled[:80]}...'")
 
 
-# ── routing verification ────────────────────────────────────────────────────────────────
+# ── routing unit tests ────────────────────────────────────────────────────────────
+
 ROUTING_TASKS: list[tuple[str, str]] = [
-    # (description, expected_route)
     ("Plan the architecture for a REST API",    "api"),
     ("Review this Python code for bugs",        "api"),
     ("Write a Python function to sort a list",  "local"),
@@ -252,30 +263,23 @@ ROUTING_TASKS: list[tuple[str, str]] = [
     ("Design the database schema for users",    "api"),
 ]
 
+
 def test_routing_logic():
-    """
-    Unit test for SMLRouter._keyword_fallback() and _OVERRIDES.
-    Doesn't require the server to be running.
-    """
-    import importlib.util, pathlib
+    """Unit test for SMLRouter._keyword_fallback(). No server needed."""
+    from unittest.mock import patch
 
-    spec = importlib.util.spec_from_file_location("crew", pathlib.Path("crew.py"))
-    mod  = importlib.util.load_from_spec(spec)  # type: ignore
-    spec.loader.exec_module(mod)                 # type: ignore
+    mod = _load_crew_module()
 
-    # Patch LLM constructor so it doesn't try to connect to anything
     class _FakeLLM:
         def __init__(self, **_): pass
 
-    from unittest.mock import patch
-    with patch("crew.LLM", _FakeLLM):
-        from crew import SMLRouter, PipelineMode
-        router = SMLRouter(
+    with patch.object(mod, "LLM", _FakeLLM):
+        router = mod.SMLRouter(
             api_llm   = _FakeLLM(),
             local_llm = _FakeLLM(),
-            mode      = PipelineMode.HYBRID,
+            mode      = mod.PipelineMode.HYBRID,
         )
-        router._router_llm = None  # disable actual LLM call
+        router._router_llm = None  # disable real LLM call
 
         failed: list[str] = []
         for desc, expected in ROUTING_TASKS:
@@ -291,49 +295,46 @@ def test_routing_logic():
 
 def test_pipeline_mode_env():
     """Verify PipelineMode.from_env() handles all valid values and bad input."""
-    import importlib, importlib.util, pathlib
-    spec = importlib.util.spec_from_file_location("crew", pathlib.Path("crew.py"))
-    mod  = importlib.util.load_from_spec(spec)  # type: ignore
-    spec.loader.exec_module(mod)                 # type: ignore
-
     from unittest.mock import patch
-    with patch("crew.LLM", lambda **_: None):
-        from crew import PipelineMode
 
-    for val, expected in [
-        ("hybrid", PipelineMode.HYBRID),
-        ("api",    PipelineMode.API),
-        ("local",  PipelineMode.LOCAL),
-        ("HYBRID", PipelineMode.HYBRID),  # case-insensitive
-        ("bad",    PipelineMode.HYBRID),  # fallback
-    ]:
-        with patch.dict(os.environ, {"PIPELINE_MODE": val}):
-            importlib.reload(mod)
-            from crew import PipelineMode as PM
-            result = PM.from_env()
-            assert result == expected, f"from_env('{val}') = {result}, expected {expected}"
-        print(f"     {GRN}✔{RST}  PIPELINE_MODE={val!r} → {result.value}")
+    mod = _load_crew_module()
+
+    cases = [
+        ("hybrid", "hybrid"),
+        ("api",    "api"),
+        ("local",  "local"),
+        ("HYBRID", "hybrid"),   # case-insensitive
+        ("bad",    "hybrid"),   # invalid → fallback
+    ]
+
+    for raw, expected_val in cases:
+        with patch.dict(os.environ, {"PIPELINE_MODE": raw}):
+            # Reload the module so from_env() re-reads the env var
+            fresh = _load_crew_module()
+            result = fresh.PipelineMode.from_env()
+            assert result.value == expected_val, \
+                f"from_env('{raw}') = '{result.value}', expected '{expected_val}'"
+        print(f"     {GRN}✔{RST}  PIPELINE_MODE={raw!r} → {result.value}")
 
 
-# ── main ───────────────────────────────────────────────────────────────────────────────
+# ── main ─────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     print()
     print(f"{BLD}Hybrid Coding Agency — Pipeline Smoke Test{RST}")
     print(f"{GRY}Target: {BASE_URL}  |  timeout: {TIMEOUT}s/req  |  quick: {QUICK}{RST}")
     print()
 
-    # Unit tests (no server needed)
     print(f"{BLD}{CYN}── Unit tests (no server required) ────────────────────────────────{RST}")
     run_test("routing keyword fallback", test_routing_logic)
     run_test("PIPELINE_MODE env parsing", test_pipeline_mode_env)
     print()
 
     if QUICK:
-        # Quick mode: only health + full pipeline
         print(f"{BLD}{CYN}── Quick integration tests ────────────────────────────────────────{RST}")
         tests = [
-            ("health check",    test_health),
-            ("full pipeline",   test_full_pipeline),
+            ("health check",  test_health),
+            ("full pipeline", test_full_pipeline),
         ]
     else:
         print(f"{BLD}{CYN}── Integration tests (server must be running) ─────────────────────{RST}")
@@ -363,16 +364,14 @@ if __name__ == "__main__":
 
     # ── summary ───────────────────────────────────────────────────────────────────
     print()
-    total  = len(results)
-    passed = sum(1 for r in results if r["status"] == "PASS")
-    failed = sum(1 for r in results if r["status"] in ("FAIL", "ERROR"))
+    total      = len(results)
+    passed     = sum(1 for r in results if r["status"] == "PASS")
+    failed     = sum(1 for r in results if r["status"] in ("FAIL", "ERROR"))
     total_time = sum(r["elapsed"] for r in results)
-
-    status_line = f"{passed}/{total} passed"
-    colour = GRN if failed == 0 else RED
+    colour     = GRN if failed == 0 else RED
 
     print(f"{BLD}{colour}╔══════════════════════════════════════════════╗{RST}")
-    print(f"{BLD}{colour}║  {status_line:<44}║{RST}")
+    print(f"{BLD}{colour}║  {f'{passed}/{total} passed':<44}║{RST}")
     print(f"{BLD}{colour}║  Total time: {total_time:.1f}s{' ' * (32 - len(f'{total_time:.1f}'))}║{RST}")
     print(f"{BLD}{colour}╚══════════════════════════════════════════════╝{RST}")
 
