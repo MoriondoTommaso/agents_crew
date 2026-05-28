@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Hybrid Coding Agency",
     description="SML router: plan→api_llm, code→local_llm. OpenAI-compatible.",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -60,9 +60,10 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 class CodeRequest(BaseModel):
-    user_request: str = Field(..., description="What to build")
-    language:     str = Field(default="Python", description="Target language")
-    topic:        str = Field(default="software", description="Domain/context")
+    user_request:     str  = Field(..., description="What to build")
+    language:         str  = Field(default="Python", description="Target language")
+    topic:            str  = Field(default="software", description="Domain/context")
+    technical_design: str  = Field(default="", description="Pre-computed design doc (optional). If empty, /api/code will auto-generate one.")
 
 class CodeResponse(BaseModel):
     request_id:  str
@@ -203,11 +204,34 @@ async def plan_only(req: CodeRequest):
 
 @app.post("/api/code")
 async def code_only(req: CodeRequest):
-    """Coding task only (senior_developer → local_llm)."""
+    """
+    Coding task only (senior_developer → local_llm).
+
+    If `technical_design` is not provided (empty string), the endpoint
+    auto-generates a minimal plan via the api_llm before coding.
+    This ensures the coder always receives the context it needs.
+    """
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
 
-    inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
+    # Auto-plan if no design was provided
+    technical_design = req.technical_design
+    if not technical_design.strip():
+        plan_inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
+        technical_design = await _run_with_timeout(
+            lambda: str(Crew(
+                agents=[crew_instance.senior_architect()],
+                tasks=[crew_instance.planning_task()],
+                process=Process.sequential, verbose=False,
+            ).kickoff(inputs=plan_inputs))
+        )
+
+    inputs = {
+        "user_request":     req.user_request,
+        "language":         req.language,
+        "topic":            req.topic,
+        "technical_design": technical_design,
+    }
     result = await _run_with_timeout(
         lambda: str(Crew(
             agents=[crew_instance.senior_developer()],
@@ -220,10 +244,11 @@ async def code_only(req: CodeRequest):
 
 @app.get("/api/models")
 async def list_models():
+    coder_model = os.getenv("OLLAMA_CODER_MODEL", "qwen2.5-coder:14b")
     return {
         "router":  "qwen2.5:1.5b (Ollama local)",
         "planner": "auto via FreeLLM (frontier)",
-        "coder":   "qwen2.5-coder:12b (Ollama local)",
+        "coder":   f"{coder_model} (Ollama local)",
     }
 
 
@@ -252,7 +277,7 @@ async def oai_chat_completions(
     OpenAI-compatible endpoint. Model routing:
       coding-agency  → full plan + code (default)
       coding-plan    → planning only
-      coding-code    → coding only (local model)
+      coding-code    → coding only (local model, auto-plans if no design provided)
     """
     if crew_instance is None:
         raise HTTPException(status_code=503, detail="Crew not initialized")
