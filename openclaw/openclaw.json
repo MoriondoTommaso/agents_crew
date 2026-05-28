@@ -40,5 +40,12 @@
     },
     "default": "coding-agency/coding-agency"
   },
+  "mcp_servers": {
+    "workspace": {
+      "url": "http://mcp-server:8001/mcp",
+      "tools_url": "http://mcp-server:8001/tools",
+      "description": "Filesystem + GitHub tools for the agent workspace"
+    }
+  },
   "autoshare": false
 }
