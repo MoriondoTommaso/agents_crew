@@ -12,8 +12,12 @@ planning_task:
 
 coding_task:
   description: >
-    Using the technical design provided, implement the full solution in {language}.
+    Using the technical design provided below, implement the full solution in {language}.
     Ensure the code is modular, includes docstrings, and handles edge cases.
+
+    Technical design:
+    {technical_design}
   expected_output: >
     The complete, executable source code with inline documentation.
+    Output ONLY the code — no prose before or after.
   agent: senior_developer
