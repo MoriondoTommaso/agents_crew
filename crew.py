@@ -79,6 +79,9 @@ class SMLRouter:
         "review_task":   "api",
     }
 
+    # API-bound keywords take priority — matched before _LOCAL_KEYWORDS.
+    # A task like "review this code" should go to api, not local.
+    _API_KEYWORDS = {"review", "plan", "design", "architect", "analyse", "analyze", "audit", "evaluate"}
     _LOCAL_KEYWORDS = {"implement", "write", "code", "develop", "build", "generate", "create"}
 
     def __init__(self, api_llm: LLM, local_llm: LLM, mode: PipelineMode) -> None:
@@ -114,7 +117,20 @@ class SMLRouter:
             return self._keyword_fallback(task_description)
 
     def _keyword_fallback(self, text: str) -> str:
+        """
+        Keyword-based fallback router used when the LLM router is unavailable.
+
+        Priority order (first match wins):
+          1. _API_KEYWORDS  — review / plan / design / ... → api
+          2. _LOCAL_KEYWORDS — write / implement / code / ... → local
+          3. default → api
+
+        API keywords are checked first so that "review this Python code"
+        routes to api despite the word "code" being present.
+        """
         words = set(text.lower().split())
+        if words & self._API_KEYWORDS:
+            return "api"
         if words & self._LOCAL_KEYWORDS:
             return "local"
         return "api"
