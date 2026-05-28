@@ -228,7 +228,18 @@ class CodingAgencyCrew():
         )
 
     def run(self, inputs: dict) -> str:
-        """Single-pass plan → code. Thread-safe."""
+        """
+        Single-pass plan → code. Thread-safe.
+
+        crewAI interpolates ALL {placeholder} variables before kickoff.
+        coding_task requires {technical_design} in the inputs dict —
+        we seed it as empty string so interpolation succeeds; the planner’s
+        output is passed to the coder via crewAI’s sequential context chain.
+        """
         with self._lock:
-            result = self.crew().kickoff(inputs=inputs)
+            full_inputs = {
+                "technical_design": "",   # satisfied by planner output via context
+                **inputs,
+            }
+            result = self.crew().kickoff(inputs=full_inputs)
             return str(result)
