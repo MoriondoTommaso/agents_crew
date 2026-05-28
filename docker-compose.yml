@@ -1,15 +1,22 @@
 # docker-compose.yml
-# Runs the Hybrid Coding Agency server.
-# Ollama stays on the host — the container reaches it via host.docker.internal.
+# Full coding agent stack:
+#   openclaw  — agentic harness (CLI, interactive terminal)
+#   coding-agency — FastAPI SML router (plan → code)
+#
+# Ollama stays on the host — reached via host.docker.internal.
 #
 # Usage:
-#   docker compose up --build
-#   docker compose up -d          # detached
-#   docker compose logs -f        # follow logs
+#   make up        → build + start all services
+#   make agent     → attach to the openclaw CLI
+#   make logs      → follow all logs
+#   make down      → stop everything
 
 services:
+
   coding-agency:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: coding-agency:latest
     container_name: coding-agency
     restart: unless-stopped
@@ -18,10 +25,8 @@ services:
     env_file:
       - .env
     environment:
-      # Override Ollama URL so the container reaches the host
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
     extra_hosts:
-      # Needed on Linux (automatic on Docker Desktop for Mac/Windows)
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -29,3 +34,31 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw
+    stdin_open: true
+    tty: true
+    depends_on:
+      coding-agency:
+        condition: service_healthy
+    volumes:
+      # Mount our pre-built config so openclaw picks it up on first run
+      - ./openclaw/openclaw.json:/root/.openclaw/openclaw.json:ro
+      # Mount the system prompt override
+      - ./openclaw/system-prompt.md:/root/.openclaw/system-prompt.md:ro
+      # Persist OpenClaw session data (conversations, cache) across restarts
+      - openclaw-data:/root/.openclaw/data
+      # Mount the project root read-write so the agent can read/write code
+      - .:/workspace
+    working_dir: /workspace
+    environment:
+      # Tell openclaw where the router is (internal Docker network)
+      OPENCLAW_API_BASE: http://coding-agency:8000/v1
+      OPENCLAW_MODEL: coding-agency
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  openclaw-data:
