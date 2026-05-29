@@ -1,51 +1,24 @@
 {
-  "$schema": "https://openclaw.ai/config.schema.json",
-  "models": {
-    "mode": "merge",
-    "providers": {
-      "coding-agency": {
-        "baseUrl": "http://coding-agency:8000/v1",
-        "apiKey": "local",
-        "api": "openai-completions",
-        "models": [
-          {
-            "id": "coding-agency",
-            "name": "Hybrid Coding Agency (plan + code)",
-            "reasoning": false,
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 32768,
-            "maxTokens": 8192
-          },
-          {
-            "id": "coding-plan",
-            "name": "Planning only (frontier LLM)",
-            "reasoning": false,
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 32768,
-            "maxTokens": 8192
-          },
-          {
-            "id": "coding-code",
-            "name": "Code only (local LLM)",
-            "reasoning": false,
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 32768,
-            "maxTokens": 8192
-          }
-        ]
-      }
-    },
-    "default": "coding-agency/coding-agency"
-  },
-  "mcp_servers": {
-    "workspace": {
-      "url": "http://mcp-server:8001/mcp",
-      "tools_url": "http://mcp-server:8001/tools",
-      "description": "Filesystem + GitHub tools for the agent workspace"
+  "models": [
+    {
+      "id": "coding-agency",
+      "name": "Coding Agency (SML Router)",
+      "base_url": "http://coding-agency:8000/v1",
+      "api_key": "local"
     }
-  },
-  "autoshare": false
+  ],
+  "default_model": "coding-agency",
+  "system_prompt_file": "/root/.openclaw/system-prompt.md",
+  "mcp_servers": [
+    {
+      "name": "filesystem-and-github",
+      "url": "http://mcp-server:8001/mcp",
+      "description": "Filesystem tools (read/write/list/delete) and GitHub tools (branches, files, PRs)"
+    },
+    {
+      "name": "memory",
+      "url": "http://memory:8002",
+      "description": "Graphiti knowledge-graph memory: recall past decisions, log tasks, get codebase context"
+    }
+  ]
 }
