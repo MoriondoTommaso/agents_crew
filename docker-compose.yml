@@ -3,15 +3,18 @@
 #
 #   coding-agency  — FastAPI SML router (plan → code), port 8000
 #   mcp-server     — MCP tool server (filesystem + GitHub), port 8001
+#   memory         — Graphiti knowledge-graph MCP service, port 8002
+#   neo4j          — Graph database backend for Graphiti, ports 7474 7687
 #   openclaw       — agentic harness (CLI, interactive terminal)
 #
 # Ollama stays on the host — reached via host.docker.internal.
 #
 # Usage:
-#   make up        → build + start all services
-#   make agent     → attach to the openclaw CLI
-#   make logs      → follow all logs
-#   make down      → stop everything
+#   make up           → build + start all services
+#   make bootstrap    → seed knowledge graph from codebase (run once)
+#   make agent        → attach to the openclaw CLI
+#   make logs         → follow all logs
+#   make down         → stop everything
 
 services:
 
@@ -56,7 +59,6 @@ services:
       GITHUB_OWNER:   ${GITHUB_OWNER:-}
       GITHUB_REPO:    ${GITHUB_REPO:-}
     volumes:
-      # Mount project root as /workspace (read-write)
       - .:/workspace
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
@@ -65,7 +67,58 @@ services:
       retries: 3
       start_period: 10s
 
-  # ── 3. Open-Claw harness ──────────────────────────────────────────────────
+  # ── 3. Neo4j graph database ────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # Neo4j Browser (optional, for inspection)
+      - "7687:7687"   # Bolt protocol
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-changeme}", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── 4. Graphiti Memory MCP service ────────────────────────────────────────
+  memory:
+    build:
+      context: ./memory
+      dockerfile: Dockerfile
+    image: memory-mcp:latest
+    container_name: memory
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      NEO4J_URI:              bolt://neo4j:7687
+      NEO4J_USER:             neo4j
+      NEO4J_PASSWORD:         ${NEO4J_PASSWORD:-changeme}
+      OPENAI_API_KEY:         ${OPENAI_API_KEY:-}
+      GRAPHITI_EMBED_MODEL:   ${GRAPHITI_EMBED_MODEL:-text-embedding-3-small}
+      GRAPHITI_LLM_MODEL:     ${GRAPHITI_LLM_MODEL:-gpt-4o-mini}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── 5. Open-Claw harness ──────────────────────────────────────────────────
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     container_name: openclaw
@@ -76,14 +129,12 @@ services:
         condition: service_healthy
       mcp-server:
         condition: service_healthy
+      memory:
+        condition: service_healthy
     volumes:
-      # Pre-built config (model list + MCP server reference)
       - ./openclaw/openclaw.json:/root/.openclaw/openclaw.json:ro
-      # System prompt override
       - ./openclaw/system-prompt.md:/root/.openclaw/system-prompt.md:ro
-      # Persist Open-Claw session data across restarts
       - openclaw-data:/root/.openclaw/data
-      # Project workspace (read-write so the agent can read/write code)
       - .:/workspace
     working_dir: /workspace
     environment:
@@ -94,3 +145,5 @@ services:
 
 volumes:
   openclaw-data:
+  neo4j-data:
+  neo4j-logs:
