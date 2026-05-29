@@ -6,6 +6,16 @@ from crewai.project import CrewBase, agent, crew, task
 from enum import Enum
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an integer env-var, stripping stray tokens (e.g. from broken .env lines)."""
+    raw = os.getenv(name, "").split()[0] if os.getenv(name, "").split() else ""
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[crew] WARNING: {name}={os.getenv(name)!r} is not a valid int — using default {default}")
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Task type enum
 # ---------------------------------------------------------------------------
@@ -161,11 +171,11 @@ class CodingAgencyCrew():
         ollama_base  = os.getenv("OLLAMA_BASE_URL",      "http://localhost:11434")
         freellm_base = os.getenv("FREELLM_BASE_URL",     "http://localhost:3001/v1")
         freellm_key  = os.getenv("FREELLMAPI_KEY",       "none")
-        llm_timeout  = int(os.getenv("LLM_TIMEOUT_SEC",  "600"))
+        llm_timeout  = _env_int("LLM_TIMEOUT_SEC",       600)
         coder_model  = os.getenv("OLLAMA_CODER_MODEL",   "qwen2.5-coder:14b")
         mode         = PipelineMode.from_env()
 
-        print(f"[CodingAgencyCrew] PIPELINE_MODE={mode.value}  coder={coder_model}")
+        print(f"[CodingAgencyCrew] PIPELINE_MODE={mode.value}  coder={coder_model}  timeout={llm_timeout}s")
 
         self.api_llm = LLM(
             model="openai/gpt-4o",
@@ -233,12 +243,12 @@ class CodingAgencyCrew():
 
         crewAI interpolates ALL {placeholder} variables before kickoff.
         coding_task requires {technical_design} in the inputs dict —
-        we seed it as empty string so interpolation succeeds; the planner’s
-        output is passed to the coder via crewAI’s sequential context chain.
+        we seed it as empty string so interpolation succeeds; the planner's
+        output is passed to the coder via crewAI's sequential context chain.
         """
         with self._lock:
             full_inputs = {
-                "technical_design": "",   # satisfied by planner output via context
+                "technical_design": "",
                 **inputs,
             }
             result = self.crew().kickoff(inputs=full_inputs)

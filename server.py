@@ -27,7 +27,19 @@ from crewai import Crew, Process
 
 load_dotenv()
 
-LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "600"))
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer env-var, stripping whitespace/inline comments.
+    Falls back to *default* if the value is missing or unparseable."""
+    raw = os.getenv(name, "").split()[0] if os.getenv(name, "").split() else ""
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[Server] WARNING: {name}={os.getenv(name)!r} is not a valid int — using default {default}")
+        return default
+
+
+LLM_TIMEOUT_SEC = _env_int("LLM_TIMEOUT_SEC", 600)
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +57,7 @@ async def get_crew():
     if _crew_instance is not None:
         return _crew_instance
     async with _crew_lock:
-        if _crew_instance is not None:   # double-checked
+        if _crew_instance is not None:
             return _crew_instance
         try:
             from crew import CodingAgencyCrew
@@ -62,7 +74,6 @@ async def get_crew():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm up in background — /health is available immediately
     asyncio.create_task(_warm_up())
     yield
     global _crew_instance
@@ -70,12 +81,11 @@ async def lifespan(app: FastAPI):
 
 
 async def _warm_up():
-    """Pre-warm crew in background; log warnings if deps unreachable."""
     _check_host_deps()
     try:
         await get_crew()
     except Exception:
-        pass  # error already logged in get_crew()
+        pass
 
 
 def _check_host_deps():
