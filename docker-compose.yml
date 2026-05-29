@@ -2,7 +2,6 @@
 # Full coding agent stack:
 #
 #   coding-agency  — FastAPI SML router (plan → code), port 8000
-#   mcp-server     — MCP tool server (filesystem + GitHub), port 8001
 #   memory         — Graphiti knowledge-graph MCP service, port 8002
 #   neo4j          — Graph database backend for Graphiti, ports 7474 7687
 #   openclaw       — agentic harness (CLI, interactive terminal)
@@ -47,33 +46,7 @@ services:
       retries: 5
       start_period: 60s
 
-  # ── 2. MCP tool server ────────────────────────────────────────────────────
-  mcp-server:
-    build:
-      context: ./mcp
-      dockerfile: Dockerfile
-    image: mcp-server:latest
-    container_name: mcp-server
-    restart: unless-stopped
-    ports:
-      - "8001:8001"
-    env_file:
-      - .env
-    environment:
-      WORKSPACE_ROOT: /workspace
-      GITHUB_TOKEN:   ${GITHUB_TOKEN:-}
-      GITHUB_OWNER:   ${GITHUB_OWNER:-}
-      GITHUB_REPO:    ${GITHUB_REPO:-}
-    volumes:
-      - .:/workspace
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
-      interval: 20s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  # ── 3. Neo4j graph database ────────────────────────────────────────────────
+  # ── 2. Neo4j graph database ────────────────────────────────────────────────
   neo4j:
     image: neo4j:5.26-community
     container_name: neo4j
@@ -95,7 +68,7 @@ services:
       retries: 5
       start_period: 40s
 
-  # ── 4. Graphiti Memory MCP service ────────────────────────────────────────
+  # ── 3. Graphiti Memory MCP service ────────────────────────────────────────
   memory:
     build:
       context: ./memory
@@ -124,7 +97,7 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── 5. Open-Claw harness ──────────────────────────────────────────────────
+  # ── 4. Open-Claw harness ──────────────────────────────────────────────────
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     container_name: openclaw
@@ -132,8 +105,6 @@ services:
     tty: true
     depends_on:
       coding-agency:
-        condition: service_healthy
-      mcp-server:
         condition: service_healthy
       memory:
         condition: service_healthy
@@ -146,6 +117,7 @@ services:
     environment:
       OPENCLAW_API_BASE: http://coding-agency:8000/v1
       OPENCLAW_MODEL:    coding-agency
+      GITHUB_TOKEN:      ${GITHUB_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
