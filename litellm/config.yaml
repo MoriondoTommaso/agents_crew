@@ -1,0 +1,40 @@
+# LiteLLM proxy config
+# Receives Anthropic-format requests from Claude Code CLI
+# Routes to FreeLLM (frontier) or Ollama (local) based on model alias
+#
+# Claude Code sends requests using model names — we map them here:
+#   claude-opus-4-5   → FreeLLM  (planning, architecture, review)
+#   claude-haiku-4-5  → Ollama   (code generation, quick tasks)
+
+model_list:
+  - model_name: claude-opus-4-5
+    litellm_params:
+      model: openai/gpt-4o
+      api_base: "os.environ/FREELLM_BASE_URL"
+      api_key: "os.environ/FREELLMAPI_KEY"
+
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: openai/gpt-4o
+      api_base: "os.environ/FREELLM_BASE_URL"
+      api_key: "os.environ/FREELLMAPI_KEY"
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: "ollama/qwen2.5-coder:14b"
+      api_base: "os.environ/OLLAMA_BASE_URL"
+
+  # Fallback: any unmatched model → FreeLLM
+  - model_name: "*"
+    litellm_params:
+      model: openai/gpt-4o
+      api_base: "os.environ/FREELLM_BASE_URL"
+      api_key: "os.environ/FREELLMAPI_KEY"
+
+litellm_settings:
+  # Translate OpenAI responses back to Anthropic format for Claude Code
+  drop_params: true
+  set_verbose: false
+
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"

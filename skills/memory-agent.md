@@ -1,60 +1,52 @@
-# Skill: memory-agent
+# Skill: Memory Agent
 
-How to use the Graphiti knowledge-graph memory effectively.
+Come usare il knowledge graph Graphiti per mantenere contesto cross-sessione.
 
-## When to RECALL
+## Endpoint base
 
-Call `memory_recall` at the **start of every task**, before reading any file:
+`http://localhost:8002`
 
+## Tool disponibili
+
+| Tool | Endpoint | Parametri |
+|---|---|---|
+| `memory_recall` | `POST /mcp/memory_recall` | `query: str`, `limit: int` |
+| `memory_add_episode` | `POST /mcp/memory_add_episode` | `name: str`, `content: str`, `source: str` |
+| `memory_get_context` | `POST /mcp/memory_get_context` | `entity: str` |
+| `memory_task_log` | `POST /mcp/memory_task_log` | `task`, `status`, `files_modified`, `decisions`, `notes` |
+| `memory_snapshot` | `GET /mcp/memory_snapshot` | — |
+
+## Quando usare cosa
+
+- **Inizio sessione**: `memory_recall` con il topic del task
+- **Inizio task su file specifico**: `memory_get_context(entity="nome_file.py")`
+- **Decisione architetturale**: `memory_add_episode` con spiegazione
+- **Fine task**: `memory_task_log` con files modificati e decisioni
+- **Debug**: `memory_snapshot` o Neo4j Browser su `http://localhost:7474`
+
+## Esempi curl
+
+```bash
+# Recall
+curl -s -X POST http://localhost:8002/mcp/memory_recall \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "LiteLLM routing config", "limit": 5}'
+
+# Add episode
+curl -s -X POST http://localhost:8002/mcp/memory_add_episode \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "decision: use nomic-embed-text", "content": "Scelto nomic-embed-text per embedding locale. Zero costo API, 274MB, qualità sufficiente per codebase search.", "source": "agent"}'
+
+# Task log
+curl -s -X POST http://localhost:8002/mcp/memory_task_log \
+  -H 'Content-Type: application/json' \
+  -d '{"task": "fix memory embedder", "status": "completed", "files_modified": ["memory/service.py"], "decisions": ["OllamaEmbedder custom class"], "notes": ""}'
 ```
-memory_recall(query="<one-sentence task description>")
-```
 
-This returns relevant facts from past sessions: previous decisions on related files, known bugs, architectural choices, and completed tasks.
+## Reset completo memoria
 
-Also call `memory_get_context` for the primary file you will touch:
-
-```
-memory_get_context(entity="crew.py")
-```
-
-## When to ADD EPISODES
-
-Call `memory_add_episode` when you:
-- Make a non-obvious architectural decision
-- Discover a constraint or bug that is not obvious from reading the code
-- Learn something about how a module is used by others
-
-Keep it short (2-5 sentences). Bad episode: "I edited crew.py". Good episode: "SMLRouter keyword fallback now checks API keywords first (review, plan, design) before local keywords (code, implement, build). This prevents prompts like 'Review this code' from being misrouted to local LLM."
-
-## When to LOG
-
-Always call `memory_task_log` as the **last step** of every task:
-
-```
-memory_task_log(
-    task="Add rate limiting to /api endpoint",
-    status="completed",
-    files_modified=["server.py", "requirements.txt"],
-    decisions=["Used slowapi library for FastAPI compatibility"],
-    notes="Rate limit set to 60 req/min per IP"
-)
-```
-
-This is what makes the agent smarter over time. If you skip this, the next session starts from zero.
-
-## Neo4j Browser
-
-The graph is inspectable at http://localhost:7474 (user: neo4j, password from .env).
-
-Useful Cypher queries:
-```cypher
-// All episodes
-MATCH (e:Episode) RETURN e.name, e.created_at ORDER BY e.created_at DESC LIMIT 20
-
-// All entities
-MATCH (n:Entity) RETURN n.name, labels(n) LIMIT 50
-
-// Relations around a file
-MATCH (n {name: 'crew.py'})-[r]-(m) RETURN n, r, m
+```bash
+make clean   # distrugge volume neo4j-data
+make up
+make bootstrap
 ```
