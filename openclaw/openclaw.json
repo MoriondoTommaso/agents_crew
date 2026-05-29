@@ -9,12 +9,10 @@
   ],
   "default_model": "coding-agency",
   "system_prompt_file": "/root/.openclaw/system-prompt.md",
+  "tools": {
+    "allow": ["group:files", "group:github"]
+  },
   "mcp_servers": [
-    {
-      "name": "filesystem-and-github",
-      "url": "http://mcp-server:8001/mcp",
-      "description": "Filesystem tools (read/write/list/delete) and GitHub tools (branches, files, PRs)"
-    },
     {
       "name": "memory",
       "url": "http://memory:8002",
