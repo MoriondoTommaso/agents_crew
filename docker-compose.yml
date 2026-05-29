@@ -41,11 +41,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 20s
       timeout: 10s
       retries: 5
-      start_period: 60s   # crewAI import + Ollama probe takes 20-40s on first boot
+      start_period: 60s
 
   # ── 2. MCP tool server ────────────────────────────────────────────────────
   mcp-server:
@@ -67,7 +67,7 @@ services:
     volumes:
       - .:/workspace
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
       interval: 20s
       timeout: 10s
       retries: 3
@@ -118,7 +118,7 @@ services:
       neo4j:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/health"]
       interval: 20s
       timeout: 10s
       retries: 3
