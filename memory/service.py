@@ -6,6 +6,9 @@ Exposes 5 MCP tools for the coding agent:
   - memory_get_context   : retrieve subgraph for a specific entity/file
   - memory_task_log      : log a completed or failed task with affected files
   - memory_snapshot      : dump full graph as JSON (debug / export)
+
+Embeddings: local via Ollama (nomic-embed-text) — no OpenAI key required.
+LLM for entity extraction: Ollama (qwen2.5:1.5b) — zero API cost.
 """
 
 import os
@@ -14,31 +17,86 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
+from graphiti_core.llm_client import LLMClient, LLMConfig
+from graphiti_core.embedder import EmbedderClient
 
 # ── Config ─────────────────────────────────────────────────────────────────
-NEO4J_URI      = os.getenv("NEO4J_URI",      "bolt://neo4j:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER",     "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "changeme")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL", "text-embedding-3-small")
-LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "gpt-4o-mini")
+NEO4J_URI      = os.getenv("NEO4J_URI",       "bolt://neo4j:7687")
+NEO4J_USER     = os.getenv("NEO4J_USER",      "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD",  "changeme")
+OLLAMA_BASE    = os.getenv("OLLAMA_BASE_URL",  "http://host.docker.internal:11434")
+EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL", "nomic-embed-text")
+LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "qwen2.5:1.5b")
+
+
+# ── Ollama embedder ────────────────────────────────────────────────────────
+class OllamaEmbedder(EmbedderClient):
+    """Thin wrapper around Ollama /api/embeddings for Graphiti."""
+
+    def __init__(self, base_url: str, model: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model    = model
+
+    async def create(self, input: str | list[str]) -> list[list[float]]:
+        texts = [input] if isinstance(input, str) else input
+        async with httpx.AsyncClient(timeout=60) as client:
+            results = []
+            for text in texts:
+                resp = await client.post(
+                    f"{self.base_url}/api/embeddings",
+                    json={"model": self.model, "prompt": text},
+                )
+                resp.raise_for_status()
+                results.append(resp.json()["embedding"])
+        return results
+
+
+# ── Ollama LLM client ──────────────────────────────────────────────────────
+class OllamaLLMClient(LLMClient):
+    """Thin wrapper around Ollama /api/chat for Graphiti entity extraction."""
+
+    def __init__(self, base_url: str, model: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model    = model
+        config = LLMConfig(model=model)
+        super().__init__(config)
+
+    async def _generate_response(self, messages: list[dict], **kwargs) -> str:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model":    self.model,
+                    "messages": messages,
+                    "stream":   False,
+                    "options":  {"temperature": 0.0},
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["message"]["content"]
+
 
 # ── App + Graphiti client ──────────────────────────────────────────────────
-app = FastAPI(title="Memory MCP Service", version="1.0.0")
+app = FastAPI(title="Memory MCP Service", version="2.0.0")
 _graphiti: Graphiti | None = None
 
 
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
+        embedder = OllamaEmbedder(base_url=OLLAMA_BASE, model=EMBED_MODEL)
+        llm      = OllamaLLMClient(base_url=OLLAMA_BASE, model=LLM_MODEL)
         _graphiti = Graphiti(
             neo4j_uri=NEO4J_URI,
             neo4j_user=NEO4J_USER,
             neo4j_password=NEO4J_PASSWORD,
+            llm_client=llm,
+            embedder=embedder,
         )
         await _graphiti.build_indices_and_constraints()
     return _graphiti
@@ -50,16 +108,16 @@ class RecallRequest(BaseModel):
     limit: int = 10
 
 class EpisodeRequest(BaseModel):
-    name: str          # short label, e.g. "fix keyword routing"
-    content: str       # free-text description of what happened
-    source: str = "agent"  # agent | human | system
+    name: str
+    content: str
+    source: str = "agent"
 
 class ContextRequest(BaseModel):
-    entity: str        # file path or entity name, e.g. "crew.py" or "SMLRouter"
+    entity: str
 
 class TaskLogRequest(BaseModel):
     task: str
-    status: str        # "completed" | "failed" | "in_progress"
+    status: str
     files_modified: list[str] = []
     decisions: list[str] = []
     notes: str = ""
@@ -68,45 +126,24 @@ class TaskLogRequest(BaseModel):
 # ── Endpoints ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "memory-mcp"}
+    return {
+        "status": "ok",
+        "service": "memory-mcp",
+        "embed_model": EMBED_MODEL,
+        "llm_model": LLM_MODEL,
+        "ollama_base": OLLAMA_BASE,
+    }
 
 
 @app.get("/tools")
 async def list_tools():
-    """MCP tool manifest."""
     return {
         "tools": [
-            {
-                "name": "memory_recall",
-                "description": "Semantic search over the knowledge graph. Returns relevant facts, decisions, and context from past tasks.",
-                "parameters": {"query": "string", "limit": "int (default 10)"}
-            },
-            {
-                "name": "memory_add_episode",
-                "description": "Ingest a new episode into the graph (observation, decision, task result). Call after every significant action.",
-                "parameters": {"name": "string", "content": "string", "source": "string (agent|human|system)"}
-            },
-            {
-                "name": "memory_get_context",
-                "description": "Retrieve all graph facts related to a specific entity (file, class, function, concept).",
-                "parameters": {"entity": "string"}
-            },
-            {
-                "name": "memory_task_log",
-                "description": "Log a completed, failed, or in-progress task with affected files and decisions made.",
-                "parameters": {
-                    "task": "string",
-                    "status": "completed|failed|in_progress",
-                    "files_modified": "list[string]",
-                    "decisions": "list[string]",
-                    "notes": "string"
-                }
-            },
-            {
-                "name": "memory_snapshot",
-                "description": "Export the full knowledge graph as JSON. Use for debugging or external inspection.",
-                "parameters": {}
-            }
+            {"name": "memory_recall",      "description": "Semantic search over the knowledge graph.",           "parameters": {"query": "string", "limit": "int (default 10)"}},
+            {"name": "memory_add_episode", "description": "Ingest a new episode into the graph.",                "parameters": {"name": "string", "content": "string", "source": "string"}},
+            {"name": "memory_get_context", "description": "Retrieve all graph facts for a specific entity.",     "parameters": {"entity": "string"}},
+            {"name": "memory_task_log",    "description": "Log a completed or failed task.",                     "parameters": {"task": "string", "status": "string", "files_modified": "list", "decisions": "list", "notes": "string"}},
+            {"name": "memory_snapshot",   "description": "Export the full knowledge graph (debug).",            "parameters": {}},
         ]
     }
 
@@ -117,12 +154,7 @@ async def memory_recall(req: RecallRequest):
     try:
         results = await g.search(req.query, num_results=req.limit)
         facts = [
-            {
-                "uuid": str(r.uuid),
-                "fact": r.fact,
-                "valid_at": r.valid_at.isoformat() if r.valid_at else None,
-                "source_node": r.source_node_uuid,
-            }
+            {"uuid": str(r.uuid), "fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None}
             for r in results
         ]
         return {"query": req.query, "results": facts, "count": len(facts)}
@@ -150,10 +182,7 @@ async def memory_add_episode(req: EpisodeRequest):
 async def memory_get_context(req: ContextRequest):
     g = await get_graphiti()
     try:
-        results = await g.search(
-            f"context and relationships for {req.entity}",
-            num_results=20,
-        )
+        results = await g.search(f"context and relationships for {req.entity}", num_results=20)
         return {
             "entity": req.entity,
             "facts": [{"fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None} for r in results],
@@ -165,15 +194,13 @@ async def memory_get_context(req: ContextRequest):
 @app.post("/mcp/memory_task_log")
 async def memory_task_log(req: TaskLogRequest):
     g = await get_graphiti()
-    content_parts = [
+    content = "\n".join(filter(None, [
         f"Task: {req.task}",
         f"Status: {req.status}",
-        f"Files modified: {', '.join(req.files_modified) if req.files_modified else 'none'}",
-        f"Decisions: {'; '.join(req.decisions) if req.decisions else 'none'}",
-    ]
-    if req.notes:
-        content_parts.append(f"Notes: {req.notes}")
-    content = "\n".join(content_parts)
+        f"Files modified: {', '.join(req.files_modified) or 'none'}",
+        f"Decisions: {'; '.join(req.decisions) or 'none'}",
+        f"Notes: {req.notes}" if req.notes else None,
+    ]))
     try:
         await g.add_episode(
             name=f"task:{req.task[:60]}",
@@ -189,7 +216,6 @@ async def memory_task_log(req: TaskLogRequest):
 
 @app.get("/mcp/memory_snapshot")
 async def memory_snapshot():
-    """Return basic graph stats. Full export via Neo4j Browser at :7474."""
     g = await get_graphiti()
     try:
         results = await g.search("*", num_results=200)

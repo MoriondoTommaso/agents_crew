@@ -1,50 +1,54 @@
 # docker-compose.yml
-# Full coding agent stack:
+# Claude Code coding agent stack
 #
-#   coding-agency  — FastAPI SML router (plan → code), port 8000
-#   memory         — Graphiti knowledge-graph MCP service, port 8002
-#   neo4j          — Graph database backend for Graphiti, ports 7474 7687
-#   openclaw       — agentic harness (CLI, interactive terminal)
+#   litellm   — Anthropic→OpenAI proxy, routes frontier/local (port 4000)
+#   neo4j     — Graph database for Graphiti memory (ports 7474 7687)
+#   memory    — Graphiti knowledge-graph MCP service (port 8002)
 #
-# Prerequisites (on the HOST machine, before make up):
-#   - ollama serve          (Ollama running on port 11434)
-#   - FreeLLM API running   (default port 3001)
+# Claude Code CLI runs on the HOST (Mac), not in Docker.
+# It connects to LiteLLM via ANTHROPIC_BASE_URL=http://localhost:4000
+# and to memory via MCP at http://localhost:8002
+#
+# Prerequisites (host machine):
+#   ollama serve                  # Ollama on port 11434
+#   ollama pull nomic-embed-text  # embedding model (~274MB)
+#   ollama pull qwen2.5:1.5b      # entity extraction model
+#   ollama pull qwen2.5-coder:14b # code generation model
 #
 # Usage:
-#   make up           → build + start all services
-#   make bootstrap    → seed knowledge graph from codebase (run once)
-#   make agent        → attach to the openclaw CLI
-#   make logs         → follow all logs
-#   make down         → stop everything
-#   make check-deps   → verify Ollama + FreeLLM reachable before starting
+#   make up        → start all 3 services
+#   make bootstrap → seed knowledge graph from codebase (run once)
+#   make claude    → launch Claude Code in current directory
+#   make logs      → follow all logs
+#   make down      → stop everything
 
 services:
 
-  # ── 1. Coding Agency server ───────────────────────────────────────────────
-  coding-agency:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: coding-agency:latest
-    container_name: coding-agency
+  # ── 1. LiteLLM proxy ──────────────────────────────────────────────────────
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
     env_file:
       - .env
     environment:
-      OLLAMA_BASE_URL:   ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      FREELLM_BASE_URL:  ${FREELLM_BASE_URL:-http://host.docker.internal:3001/v1}
-      FREELLMAPI_KEY:    ${FREELLMAPI_KEY:-none}
-      PIPELINE_MODE:     ${PIPELINE_MODE:-hybrid}
+      FREELLM_BASE_URL: ${FREELLM_BASE_URL:-http://host.docker.internal:3001/v1}
+      FREELLMAPI_KEY:   ${FREELLMAPI_KEY:-none}
+      OLLAMA_BASE_URL:  ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local}
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--detailed_debug"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
-      interval: 20s
-      timeout: 10s
+      test: ["CMD", "curl", "-sf", "http://localhost:4000/health"]
+      interval: 15s
+      timeout: 5s
       retries: 5
-      start_period: 60s
+      start_period: 20s
 
   # ── 2. Neo4j graph database ────────────────────────────────────────────────
   neo4j:
@@ -84,12 +88,14 @@ services:
       NEO4J_URI:             bolt://neo4j:7687
       NEO4J_USER:            neo4j
       NEO4J_PASSWORD:        ${NEO4J_PASSWORD:-changeme}
-      OPENAI_API_KEY:        ${OPENAI_API_KEY:-}
-      GRAPHITI_EMBED_MODEL:  ${GRAPHITI_EMBED_MODEL:-text-embedding-3-small}
-      GRAPHITI_LLM_MODEL:    ${GRAPHITI_LLM_MODEL:-gpt-4o-mini}
+      OLLAMA_BASE_URL:       ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      GRAPHITI_EMBED_MODEL:  ${GRAPHITI_EMBED_MODEL:-nomic-embed-text}
+      GRAPHITI_LLM_MODEL:    ${GRAPHITI_LLM_MODEL:-qwen2.5:1.5b}
     depends_on:
       neo4j:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8002/health"]
       interval: 20s
@@ -97,31 +103,6 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── 4. Open-Claw harness ──────────────────────────────────────────────────
-  openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
-    container_name: openclaw
-    stdin_open: true
-    tty: true
-    depends_on:
-      coding-agency:
-        condition: service_healthy
-      memory:
-        condition: service_healthy
-    volumes:
-      - ./openclaw/openclaw.json:/root/.openclaw/openclaw.json:ro
-      - ./openclaw/system-prompt.md:/root/.openclaw/system-prompt.md:ro
-      - openclaw-data:/root/.openclaw/data
-      - .:/workspace
-    working_dir: /workspace
-    environment:
-      OPENCLAW_API_BASE: http://coding-agency:8000/v1
-      OPENCLAW_MODEL:    coding-agency
-      GITHUB_TOKEN:      ${GITHUB_TOKEN:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
 volumes:
-  openclaw-data:
   neo4j-data:
   neo4j-logs:
