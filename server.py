@@ -31,26 +31,72 @@ LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "600"))
 
 
 # ---------------------------------------------------------------------------
-# App lifecycle
+# App lifecycle — lazy crew init so /health works immediately
 # ---------------------------------------------------------------------------
 
-crew_instance = None
+_crew_instance = None
+_crew_lock = asyncio.Lock()
+_crew_error: str | None = None
+
+
+async def get_crew():
+    """Lazy singleton: initialise CodingAgencyCrew on first call."""
+    global _crew_instance, _crew_error
+    if _crew_instance is not None:
+        return _crew_instance
+    async with _crew_lock:
+        if _crew_instance is not None:   # double-checked
+            return _crew_instance
+        try:
+            from crew import CodingAgencyCrew
+            print("[Server] Initialising CodingAgencyCrew ...")
+            _crew_instance = await asyncio.to_thread(CodingAgencyCrew)
+            _crew_error = None
+            print("[Server] CodingAgencyCrew ready.")
+        except Exception as exc:
+            _crew_error = str(exc)
+            print(f"[Server] CodingAgencyCrew init failed: {exc}")
+            raise HTTPException(status_code=503, detail=f"Crew init failed: {exc}")
+    return _crew_instance
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global crew_instance
-    from crew import CodingAgencyCrew
-    print("[Server] Warming up CodingAgencyCrew and SMLRouter...")
-    crew_instance = CodingAgencyCrew()
-    print("[Server] Ready.")
+    # Warm up in background — /health is available immediately
+    asyncio.create_task(_warm_up())
     yield
-    crew_instance = None
+    global _crew_instance
+    _crew_instance = None
+
+
+async def _warm_up():
+    """Pre-warm crew in background; log warnings if deps unreachable."""
+    _check_host_deps()
+    try:
+        await get_crew()
+    except Exception:
+        pass  # error already logged in get_crew()
+
+
+def _check_host_deps():
+    """Warn (don't crash) if Ollama / FreeLLM are not reachable."""
+    import urllib.request
+    checks = [
+        (os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434"), "Ollama"),
+        (os.getenv("FREELLM_BASE_URL", "http://host.docker.internal:3001/v1").rstrip("/v1"), "FreeLLM"),
+    ]
+    for url, name in checks:
+        try:
+            urllib.request.urlopen(url, timeout=3)
+            print(f"[Server] ✓ {name} reachable at {url}")
+        except Exception:
+            print(f"[Server] ⚠  {name} NOT reachable at {url} — start it before sending requests")
 
 
 app = FastAPI(
     title="Hybrid Coding Agency",
     description="SML router: plan→api_llm, code→local_llm. OpenAI-compatible.",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -63,7 +109,7 @@ class CodeRequest(BaseModel):
     user_request:     str  = Field(..., description="What to build")
     language:         str  = Field(default="Python", description="Target language")
     topic:            str  = Field(default="software", description="Domain/context")
-    technical_design: str  = Field(default="", description="Pre-computed design doc (optional). If empty, /api/code will auto-generate one.")
+    technical_design: str  = Field(default="", description="Pre-computed design doc (optional).")
 
 class CodeResponse(BaseModel):
     request_id:  str
@@ -142,7 +188,6 @@ async def _stream_oai_response(content: str, model: str = "coding-agency") -> As
 
 
 async def _run_with_timeout(fn, *args):
-    """Run a blocking function in a thread with a hard timeout → HTTP 504 on expiry."""
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(fn, *args),
@@ -151,7 +196,7 @@ async def _run_with_timeout(fn, *args):
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail=f"Pipeline timed out after {LLM_TIMEOUT_SEC}s. Increase LLM_TIMEOUT_SEC or simplify the request."
+            detail=f"Pipeline timed out after {LLM_TIMEOUT_SEC}s."
         )
 
 
@@ -161,15 +206,17 @@ async def _run_with_timeout(fn, *args):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "crew_ready": crew_instance is not None}
+    """Always returns 200 immediately — even before crew is initialised."""
+    return {
+        "status": "ok",
+        "crew_ready": _crew_instance is not None,
+        "crew_error": _crew_error,
+    }
 
 
 @app.post("/api/run", response_model=CodeResponse)
 async def run_pipeline(req: CodeRequest):
-    """Full plan → code pipeline (single pass)."""
-    if crew_instance is None:
-        raise HTTPException(status_code=503, detail="Crew not initialized")
-
+    crew = await get_crew()
     request_id = uuid.uuid4().hex[:8]
     start = time.time()
     inputs = {
@@ -177,7 +224,7 @@ async def run_pipeline(req: CodeRequest):
         "language":     req.language,
         "topic":        req.topic,
     }
-    result = await _run_with_timeout(crew_instance.run, inputs)
+    result = await _run_with_timeout(crew.run, inputs)
     return CodeResponse(
         request_id  = request_id,
         result      = result,
@@ -187,15 +234,12 @@ async def run_pipeline(req: CodeRequest):
 
 @app.post("/api/plan")
 async def plan_only(req: CodeRequest):
-    """Planning task only (senior_architect → api_llm)."""
-    if crew_instance is None:
-        raise HTTPException(status_code=503, detail="Crew not initialized")
-
+    crew = await get_crew()
     inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
     result = await _run_with_timeout(
         lambda: str(Crew(
-            agents=[crew_instance.senior_architect()],
-            tasks=[crew_instance.planning_task()],
+            agents=[crew.senior_architect()],
+            tasks=[crew.planning_task()],
             process=Process.sequential, verbose=False,
         ).kickoff(inputs=inputs))
     )
@@ -204,28 +248,17 @@ async def plan_only(req: CodeRequest):
 
 @app.post("/api/code")
 async def code_only(req: CodeRequest):
-    """
-    Coding task only (senior_developer → local_llm).
-
-    If `technical_design` is not provided (empty string), the endpoint
-    auto-generates a minimal plan via the api_llm before coding.
-    This ensures the coder always receives the context it needs.
-    """
-    if crew_instance is None:
-        raise HTTPException(status_code=503, detail="Crew not initialized")
-
-    # Auto-plan if no design was provided
+    crew = await get_crew()
     technical_design = req.technical_design
     if not technical_design.strip():
         plan_inputs = {"user_request": req.user_request, "language": req.language, "topic": req.topic}
         technical_design = await _run_with_timeout(
             lambda: str(Crew(
-                agents=[crew_instance.senior_architect()],
-                tasks=[crew_instance.planning_task()],
+                agents=[crew.senior_architect()],
+                tasks=[crew.planning_task()],
                 process=Process.sequential, verbose=False,
             ).kickoff(inputs=plan_inputs))
         )
-
     inputs = {
         "user_request":     req.user_request,
         "language":         req.language,
@@ -234,8 +267,8 @@ async def code_only(req: CodeRequest):
     }
     result = await _run_with_timeout(
         lambda: str(Crew(
-            agents=[crew_instance.senior_developer()],
-            tasks=[crew_instance.coding_task()],
+            agents=[crew.senior_developer()],
+            tasks=[crew.coding_task()],
             process=Process.sequential, verbose=False,
         ).kickoff(inputs=inputs))
     )
@@ -273,15 +306,6 @@ async def oai_chat_completions(
     req: OAIChatRequest,
     authorization: str | None = Header(default=None),
 ):
-    """
-    OpenAI-compatible endpoint. Model routing:
-      coding-agency  → full plan + code (default)
-      coding-plan    → planning only
-      coding-code    → coding only (local model, auto-plans if no design provided)
-    """
-    if crew_instance is None:
-        raise HTTPException(status_code=503, detail="Crew not initialized")
-
     user_request = _extract_user_request(req.messages)
     language     = _parse_language_from_text(user_request)
     native_req   = CodeRequest(user_request=user_request, language=language)
@@ -292,7 +316,7 @@ async def oai_chat_completions(
     elif req.model == "coding-code":
         resp    = await code_only(native_req)
         content = resp["result"]
-    else:  # coding-agency or any unknown model
+    else:
         code_resp = await run_pipeline(native_req)
         content   = code_resp.result
 
