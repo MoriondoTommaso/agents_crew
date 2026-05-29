@@ -1,83 +1,63 @@
-# Hybrid Coding Agency
+# agents_crew
 
-A lightweight **SML router** that exposes an OpenAI-compatible API backed by two LLMs,
-plus an MCP tool server that gives the agent read/write access to the local filesystem
-and GitHub.
+Infrastruttura per sviluppo agentico con **Claude Code** come motore,
+**LiteLLM** per routing ibrido frontier/locale, e **Graphiti** per memoria
+persistente cross-sessione.
 
-| Task | Model | Where |
-|---|---|---|
-| Planning & architecture | Frontier LLM (via FreeLLM) | API |
-| Code generation | `qwen2.5-coder:14b` | Local (Ollama) |
-| Routing decisions | `qwen2.5:1.5b` | Local (Ollama) |
+Zero costi API per embedding e code generation — tutto locale via Ollama.
 
-Designed to sit behind an agentic harness (Open-Claw). The harness brings context,
-MCP tools, and the iteration loop — this router brings **cost efficiency**:
-zero API spend on code generation.
-
-## Architecture
+## Architettura
 
 ```
-Open-Claw (harness)
-    │  /v1/chat/completions
+Claude Code CLI (Mac)
+    │  ANTHROPIC_BASE_URL=http://localhost:4000
     ▼
-Hybrid Coding Agency   :8000   plan → code pipeline
-    │ plan                │ code
-FreeLLM API         Ollama local
-(gpt-4o / etc)      (qwen2.5-coder:14b)
+LiteLLM proxy :4000
+    ├── claude-opus-4-5 / claude-sonnet-4-5  →  FreeLLM (planning, review)
+    └── claude-haiku-4-5                     →  Ollama qwen2.5-coder:14b (codice)
 
-Open-Claw MCP tools:
-    ├── filesystem   read/write /workspace via mcp-server :8001
-    └── github       branch / commit / PR via GitHub API
+MCP: Memory service :8002
+    └── Graphiti + Neo4j
+            ├── embedding:          Ollama nomic-embed-text  (locale, gratuito)
+            └── entity extraction:  Ollama qwen2.5:1.5b      (locale, gratuito)
 ```
 
-Single-pass pipeline: `plan → code → return`.
-Iteration is handled by the harness (Open-Claw executes code, reads output, loops).
-
-## Project Structure
+## Struttura repo
 
 ```
 agents_crew/
-├── server.py              # FastAPI app — OpenAI-compatible endpoints
-├── crew.py                # CodingAgencyCrew + SMLRouter
-├── main.py                # CLI entry point
-├── config/
-│   ├── agents.yaml        # Agent definitions
-│   └── tasks.yaml         # Task definitions
-├── mcp/
-│   ├── server.py          # MCP tool server (filesystem + GitHub)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── openclaw/
-│   ├── openclaw.json      # Open-Claw config (models + MCP server)
-│   └── system-prompt.md   # Agent system prompt with tool instructions
-├── skills/
-│   ├── README.md          # How to use skills
-│   └── coding-agent.md    # Full coding workflow skill
-├── tests/
-├── test_pipeline.py       # Unit + integration smoke tests
-├── e2e_task_test.py       # End-to-end 6-step test
-├── Dockerfile             # coding-agency container
-├── docker-compose.yml     # Full stack: coding-agency + mcp-server + openclaw
+├── CLAUDE.md                  ← istruzioni comportamento per Claude Code
+├── MEMORY.md                  ← seed knowledge graph (bootstrap)
 ├── Makefile
 ├── .env.example
-└── pyproject.toml
+├── .claude/
+│   └── settings.json          ← MCP config (memory server)
+├── litellm/
+│   └── config.yaml            ← routing FreeLLM / Ollama
+├── memory/
+│   ├── Dockerfile
+│   ├── service.py             ← Graphiti MCP, 5 tool, embedding locale
+│   └── bootstrap.py           ← scansione AST codebase → graph
+└── docker-compose.yml         ← 3 container: litellm, neo4j, memory
 ```
 
 ## Quick Start
 
-### Prerequisites
+### Prerequisiti
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac/Windows)
-  or Docker Engine + Compose plugin (Linux)
-- [Ollama](https://ollama.com/) running on the host with models pulled:
-  ```bash
-  ollama pull qwen2.5-coder:14b
-  ollama pull qwen2.5:1.5b
-  ```
-- A FreeLLM (or any OpenAI-compatible) endpoint for planning.
-- *(Optional)* A GitHub personal access token with `repo` scope for GitHub tools.
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [Ollama](https://ollama.com/) in esecuzione sull'host
+- [Claude Code CLI](https://code.claude.com/docs/en/quickstart)
+- FreeLLM o qualsiasi endpoint OpenAI-compatible per i task di planning
+- GitHub personal access token con scope `repo`
 
-### 1. Configure
+### 1. Installa Claude Code
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+### 2. Configura
 
 ```bash
 git clone https://github.com/MoriondoTommaso/agents_crew
@@ -85,192 +65,189 @@ cd agents_crew
 cp .env.example .env
 ```
 
-Edit `.env`:
+Modifica `.env`:
 
 ```bash
-# Required
 FREELLM_BASE_URL=http://localhost:3001/v1
-FREELLMAPI_KEY=your-key
-
-# Optional — enables github_* MCP tools
+FREELLMAPI_KEY=none
 GITHUB_TOKEN=ghp_...
-GITHUB_OWNER=MoriondoTommaso
-GITHUB_REPO=agents_crew
+NEO4J_PASSWORD=cambia-questa
+LITELLM_MASTER_KEY=sk-local
 ```
 
-### 2. Start the stack
+### 3. Pull modelli Ollama
+
+```bash
+make models
+# → nomic-embed-text   274MB   embedding memoria
+# → qwen2.5:1.5b       ~1GB    entity extraction memoria
+# → qwen2.5-coder:14b  ~9GB    code generation
+```
+
+### 4. Avvia lo stack
 
 ```bash
 make up
-# or:
-docker compose up --build -d
 ```
 
-This starts three containers:
-
-| Container | Port | Role |
+| Container | Porta | Ruolo |
 |---|---|---|
-| `coding-agency` | 8000 | Plan → code pipeline |
-| `mcp-server` | 8001 | Filesystem + GitHub tools |
-| `openclaw` | — | Agentic harness (CLI) |
+| `litellm` | 4000 | Proxy Anthropic→OpenAI, routing FreeLLM/Ollama |
+| `neo4j` | 7474 / 7687 | Graph database |
+| `memory` | 8002 | Graphiti MCP service |
 
-### 3. Attach to Open-Claw
+### 5. Seed knowledge graph (solo prima volta)
 
 ```bash
-make agent
-# or:
-docker attach openclaw
+make bootstrap
+# → scansiona tutti i .py del repo
+# → ingesta struttura nel knowledge graph
 ```
 
-Give it a task:
-
-```
-Add a /api/review endpoint to server.py that sends code to the senior architect for review.
-```
-
-Open-Claw will: read the codebase → plan → create a branch → implement → commit → open a PR.
-
-### 4. Verify
+### 6. Lancia Claude Code
 
 ```bash
-# Health checks
-curl http://localhost:8000/health
-curl http://localhost:8001/health
-
-# Full E2E test (with server running)
-uv run python e2e_task_test.py
+make claude
 ```
 
-## API Endpoints
+Claude Code si apre nel terminale, legge `CLAUDE.md` automaticamente,
+carica il MCP memory da `.claude/settings.json`, e punta a LiteLLM
+come backend LLM.
 
-### Coding Agency (`:8000`)
+## Workflow agentico
 
-| Method | Path | Description |
+Ogni sessione segue questo loop automatico:
+
+```
+1. RECALL     cerca contesto rilevante in Graphiti
+2. PLAN       pianifica la minima diff necessaria
+3. BRANCH     git checkout -b feat/<slug>
+4. IMPLEMENT  write → bash (esegui) → leggi output → correggi → ripeti
+5. PR         gh pr create
+6. LOG        memory_task_log → salva nel knowledge graph
+```
+
+L'agentic loop (scrive → esegue → vede errore → corregge) è nativo
+in Claude Code — non serve orchestrazione esterna.
+
+## Memory MCP — tool disponibili
+
+Endpoint base: `http://localhost:8002`
+
+| Tool | Endpoint | Descrizione |
 |---|---|---|
-| `GET` | `/health` | Server + crew status |
-| `POST` | `/v1/chat/completions` | OpenAI-compatible entry point |
-| `POST` | `/api/run` | Full plan → code pipeline |
-| `POST` | `/api/plan` | Planning task only |
-| `POST` | `/api/code` | Coding task only |
-| `GET` | `/api/models` | Active model info |
-| `GET` | `/v1/models` | OAI-compatible model list |
+| `memory_recall` | `POST /mcp/memory_recall` | Ricerca semantica nel graph |
+| `memory_add_episode` | `POST /mcp/memory_add_episode` | Ingesta un episodio |
+| `memory_get_context` | `POST /mcp/memory_get_context` | Contesto per entità/file |
+| `memory_task_log` | `POST /mcp/memory_task_log` | Log task completato/fallito |
+| `memory_snapshot` | `GET /mcp/memory_snapshot` | Export graph (debug) |
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "coding-agency", "messages": [{"role": "user", "content": "write a binary search in Python"}]}'
+# Verifica health con modelli attivi
+curl http://localhost:8002/health
+
+# Ricerca manuale nel graph
+curl -s -X POST http://localhost:8002/mcp/memory_recall \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "LiteLLM routing config", "limit": 5}'
 ```
 
-### MCP Server (`:8001`)
+## LiteLLM routing
 
-| Method | Path | Description |
+Claude Code usa nomi modello Anthropic — LiteLLM li mappa ai backend reali:
+
+| Modello Claude Code | Backend | Uso consigliato |
 |---|---|---|
-| `GET` | `/health` | Server status |
-| `GET` | `/tools` | MCP tool manifest |
-| `POST` | `/mcp` | JSON-RPC 2.0 tool call |
+| `claude-opus-4-5` | FreeLLM → gpt-4o | Planning, architettura, review |
+| `claude-sonnet-4-5` | FreeLLM → gpt-4o | Task medi |
+| `claude-haiku-4-5` | Ollama → qwen2.5-coder:14b | Code generation, task rapidi |
 
-#### Available MCP tools
+Per cambiare modello al volo dentro Claude Code: `/model`
 
-| Tool | Description |
+## Variabili d'ambiente
+
+| Variabile | Default | Descrizione |
+|---|---|---|
+| `FREELLM_BASE_URL` | `http://localhost:3001/v1` | Endpoint FreeLLM |
+| `FREELLMAPI_KEY` | `none` | API key FreeLLM |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint Ollama |
+| `LITELLM_MASTER_KEY` | `sk-local` | Chiave proxy LiteLLM (= ANTHROPIC_API_KEY per Claude Code) |
+| `NEO4J_PASSWORD` | `changeme` | Password Neo4j |
+| `GITHUB_TOKEN` | — | GitHub PAT scope `repo` |
+| `GRAPHITI_EMBED_MODEL` | `nomic-embed-text` | Modello embedding locale |
+| `GRAPHITI_LLM_MODEL` | `qwen2.5:1.5b` | Modello entity extraction locale |
+
+## Comandi Makefile
+
+```bash
+make up          # avvia stack Docker
+make down        # ferma stack
+make bootstrap   # pull modelli + seed knowledge graph (prima volta)
+make models      # pull tutti i modelli Ollama
+make claude      # lancia Claude Code puntato a LiteLLM
+make logs        # segui tutti i log
+make clean       # ferma + distrugge volumi (reset completo)
+```
+
+## Comandi utili dentro Claude Code
+
+| Comando | Azione |
 |---|---|
-| `read_file` | Read a file from `/workspace` |
-| `write_file` | Write/create a file in `/workspace` |
-| `list_directory` | List directory contents |
-| `delete_file` | Delete a file |
-| `github_get_file` | Read a file from GitHub |
-| `github_create_branch` | Create a feature branch |
-| `github_create_or_update_file` | Commit a file to GitHub |
-| `github_create_pr` | Open a pull request |
-| `github_list_prs` | List pull requests |
+| `Shift+Tab` | Plan mode — pianifica senza eseguire |
+| `/model` | Cambia modello al volo |
+| `/resume` | Riprende sessione precedente |
+| `/exit` | Esce |
 
 ```bash
-# Example: read a file via MCP
-curl http://localhost:8001/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_file", "arguments": {"path": "server.py"}}}'
+# Riprende l'ultima sessione
+make claude -- --continue
 ```
 
-## PIPELINE_MODE
+## Debug
 
-| Value | Behaviour | When to use |
-|---|---|---|
-| `hybrid` *(default)* | SMLRouter decides per-task: planning → API, coding → local | Best cost/quality balance |
-| `api` | All tasks → frontier LLM | Ollama unavailable, max quality |
-| `local` | All tasks → Ollama | Offline, cost control, privacy |
+```bash
+# Log di tutti i container
+make logs
+
+# Health check singoli servizi
+curl http://localhost:4000/health   # LiteLLM
+curl http://localhost:8002/health   # Memory
+
+# Neo4j Browser (graph visuale)
+open http://localhost:7474
+# login: neo4j / <NEO4J_PASSWORD da .env>
+
+# Reset completo memoria
+make clean && make up && make bootstrap
+```
+
+## Lavorare su repo diverse
+
+Claude Code vede solo la cartella in cui viene lanciato.
+Lo stack Docker (LiteLLM + memory) è condiviso tra tutti i progetti.
+
+```bash
+# Progetto diverso
+cd ~/progetti/altro-repo
+ANTHROPIC_BASE_URL=http://localhost:4000 \
+ANTHROPIC_API_KEY=sk-local \
+claude
+```
+
+La memoria Graphiti è condivisa tra sessioni e repo.
+Per isolare la memoria per progetto, modifica `memory/service.py`
+aggiungendo un `group_id` distinto per repo.
 
 ## Skills
 
-Skills are Markdown prompt packs that give Open-Claw specialised context.
-See [`skills/README.md`](skills/README.md) for details.
+File Markdown in `skills/` con workflow e context specializzati.
+Caricali esplicitamente nel prompt:
 
-| Skill | Description |
+```
+> Leggi ./skills/coding-agent.md e segui il workflow per aggiungere...
+```
+
+| Skill | Descrizione |
 |---|---|
-| `coding-agent` | Full coding workflow: explore → branch → implement → PR |
-
-## Configuration
-
-All settings via `.env` (see `.env.example`):
-
-| Variable | Default | Description |
-|---|---|---|
-| `PIPELINE_MODE` | `hybrid` | Routing mode |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint |
-| `OLLAMA_CODER_MODEL` | `qwen2.5-coder:14b` | Code generation model |
-| `OLLAMA_ROUTER_MODEL` | `qwen2.5:1.5b` | Routing model |
-| `FREELLM_BASE_URL` | `http://localhost:3001/v1` | FreeLLM endpoint |
-| `FREELLMAPI_KEY` | `none` | FreeLLM API key |
-| `LLM_TIMEOUT_SEC` | `600` | Hard timeout per LLM call |
-| `GITHUB_TOKEN` | *(empty)* | GitHub PAT — enables GitHub MCP tools |
-| `GITHUB_OWNER` | *(empty)* | Default GitHub owner |
-| `GITHUB_REPO` | *(empty)* | Default GitHub repo |
-
-## Testing
-
-```bash
-# Unit tests only (no server needed)
-uv run python test_pipeline.py
-
-# Full E2E test (stack must be running)
-make up
-uv run python e2e_task_test.py
-```
-
-## Harness integration (without Docker)
-
-### Open-Claw (manual onboard)
-
-```bash
-openclaw onboard --non-interactive \
-  --auth-choice custom-api-key \
-  --custom-base-url "http://localhost:8000/v1" \
-  --custom-model-id "coding-agency" \
-  --custom-api-key "local" \
-  --custom-compatibility openai
-
-openclaw models set custom/coding-agency
-```
-
-### Aider
-
-```bash
-aider --openai-api-base http://localhost:8000/v1 --model coding-agency
-```
-
-### Continue.dev
-
-```json
-{
-  "title": "Coding Agency",
-  "provider": "openai",
-  "model": "coding-agency",
-  "apiBase": "http://localhost:8000/v1",
-  "apiKey": "local"
-}
-```
-
-## Development
-
-```bash
-uv run ruff check .    # lint
-uv run python test_pipeline.py   # unit tests
-```
+| `coding-agent.md` | Workflow completo: recall → branch → implement → PR → log |
+| `memory-agent.md` | Come usare i tool Graphiti, esempi curl, reset |
