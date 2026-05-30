@@ -5,7 +5,7 @@ graphiti-core 0.3.0 verified:
   LLMConfig(model, base_url, api_key)
   OpenAIClient.get_embedder() -> self.client.embeddings
   embedding call: embedder.create(input=[text], model='text-embedding-3-small') <- intercepted
-  build_indices_and_constraints() hardcodes 1024d                               <- overridden to 768d
+  build_indices_and_constraints() hardcodes 1024d + missing fulltext indices    <- fully replaced
 
 nomic-embed-text (Ollama) produces 768-dimensional vectors.
 """
@@ -34,11 +34,7 @@ OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
 # ── Embedder proxy ─────────────────────────────────────────────────────────────
 class _EmbedderProxy:
-    """Intercepts embedder.create() calls and forces model=EMBED_MODEL.
-
-    Graphiti 0.3.0 passes model='text-embedding-3-small' hardcoded in
-    nodes.py, edges.py, search.py, utils.py. We override it every time.
-    """
+    """Intercepts embedder.create() calls and forces model=EMBED_MODEL."""
     def __init__(self, embeddings, model: str):
         self._embeddings = embeddings
         self._model = model
@@ -53,14 +49,17 @@ class _PatchedOpenAIClient(OpenAIClient):
         return _EmbedderProxy(self.client.embeddings, EMBED_MODEL)
 
 
-# ── Index creation with correct dimensions ──────────────────────────────────────
+# ── Index creation (replaces graphiti's hardcoded version) ─────────────────────
 async def _build_indices(driver, dim: int):
-    """Create Neo4j vector indices using the actual embedding dimensions.
+    """Full replacement for graphiti_core's build_indices_and_constraints.
 
-    Replaces graphiti_core's hardcoded 1024d indices with the correct dim.
-    Uses IF NOT EXISTS so re-running is safe.
+    Includes:
+    - Vector indices with correct dimensions (dim instead of hardcoded 1024)
+    - Fulltext indices (name_and_summary, episode_content) that Graphiti expects
+    - All uniqueness constraints and regular property indices
     """
     queries = [
+        # ─ Vector indices ──────────────────────────────────────────────────────────
         f"""
         CREATE VECTOR INDEX fact_embedding IF NOT EXISTS
         FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding)
@@ -85,11 +84,21 @@ async def _build_indices(driver, dim: int):
             `vector.similarity_function`: 'cosine'
         }}}}
         """,
-        # Non-vector constraints / indices (unchanged from graphiti source)
+        # ─ Fulltext indices ───────────────────────────────────────────────────────
+        """
+        CREATE FULLTEXT INDEX name_and_summary IF NOT EXISTS
+        FOR (n:Entity) ON EACH [n.name, n.summary]
+        """,
+        """
+        CREATE FULLTEXT INDEX episode_content IF NOT EXISTS
+        FOR (n:Episodic) ON EACH [n.content]
+        """,
+        # ─ Uniqueness constraints ───────────────────────────────────────────────
         "CREATE CONSTRAINT entity_uuid IF NOT EXISTS FOR (n:Entity) REQUIRE n.uuid IS UNIQUE",
         "CREATE CONSTRAINT episodic_uuid IF NOT EXISTS FOR (n:Episodic) REQUIRE n.uuid IS UNIQUE",
         "CREATE CONSTRAINT community_uuid IF NOT EXISTS FOR (n:Community) REQUIRE n.uuid IS UNIQUE",
         "CREATE CONSTRAINT relation_uuid IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.uuid IS UNIQUE",
+        # ─ Property indices ────────────────────────────────────────────────────────
         "CREATE INDEX entity_group_id IF NOT EXISTS FOR (n:Entity) ON (n.group_id)",
         "CREATE INDEX episodic_group_id IF NOT EXISTS FOR (n:Episodic) ON (n.group_id)",
         "CREATE INDEX community_group_id IF NOT EXISTS FOR (n:Community) ON (n.group_id)",
@@ -123,8 +132,8 @@ async def get_graphiti() -> Graphiti:
             password=NEO4J_PASSWORD,
             llm_client=llm,
         )
-        # Skip graphiti's build_indices_and_constraints() (hardcodes 1024d).
-        # Run our own version with the correct EMBED_DIM instead.
+        # Skip graphiti's build_indices_and_constraints() — it hardcodes 1024d.
+        # Our _build_indices() uses correct EMBED_DIM and includes fulltext indices.
         await _build_indices(_graphiti.driver, EMBED_DIM)
     return _graphiti
 
