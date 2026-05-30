@@ -43,17 +43,9 @@ class _EmbedderProxy:
 
 
 class _PatchedOpenAIClient(OpenAIClient):
+    """OpenAIClient with embedder redirected to Ollama."""
     def get_embedder(self):
         return _EmbedderProxy(EMBED_MODEL, OLLAMA_OPENAI_BASE)
-
-    async def _generate_response(self, messages, response_model=None, **kwargs):
-        """Override to log the raw LLM response and detect null content."""
-        try:
-            response = await super()._generate_response(messages, response_model=response_model, **kwargs)
-            return response
-        except Exception as e:
-            logger.error("LLM call failed: %s", traceback.format_exc())
-            raise
 
 
 # ── Index creation ─────────────────────────────────────────────────────────────
