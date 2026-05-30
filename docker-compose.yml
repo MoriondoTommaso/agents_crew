@@ -64,6 +64,9 @@ services:
       OLLAMA_BASE_URL:      ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       GRAPHITI_EMBED_MODEL: ${GRAPHITI_EMBED_MODEL:-nomic-embed-text}
       GRAPHITI_LLM_MODEL:   ${GRAPHITI_LLM_MODEL:-qwen2.5:1.5b}
+    volumes:
+      # Mount the repo root so bootstrap.py can scan all Python source files
+      - .:/workspace:ro
     depends_on:
       neo4j:
         condition: service_healthy
