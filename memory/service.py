@@ -57,12 +57,11 @@ async def _ollama_embed(texts: list[str]) -> list[list[float]]:
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        # OpenAIClient in 0.3.0 uses the openai-python library;
-        # point it at Ollama's OpenAI-compatible endpoint.
+        # LLMConfig in graphiti-core 0.3.0 only accepts: model, api_key, base_url
+        # small_model was added in a later version — do NOT pass it here.
         llm = OpenAIClient(
             config=LLMConfig(
                 model=LLM_MODEL,
-                small_model=LLM_MODEL,
                 base_url=OLLAMA_OPENAI_BASE,
                 api_key="ollama",
             )
