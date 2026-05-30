@@ -7,90 +7,35 @@ Exposes 5 MCP tools for the coding agent:
   - memory_task_log      : log a completed or failed task with affected files
   - memory_snapshot      : dump full graph as JSON (debug / export)
 
-Embeddings: local via Ollama (nomic-embed-text) — no OpenAI key required.
-LLM for entity extraction: Ollama (qwen2.5:1.5b) — zero API cost.
-
-Note on graphiti-core 0.3.x imports:
-  LLMClient  → graphiti_core.llm_client.client
-  LLMConfig  → graphiti_core.llm_client.config
-  EmbedderClient → graphiti_core.embedder.client
+LLM + Embeddings: Ollama via OpenAI-compatible API (official Graphiti pattern).
+  - OpenAIGenericClient  → /v1/chat/completions  (entity extraction)
+  - OpenAIEmbedder       → /v1/embeddings        (semantic search)
+No OpenAI API key required.
 """
 
 import os
-import asyncio
 from datetime import datetime, timezone
 
-import httpx
+import openai
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
-from graphiti_core.llm_client.client import LLMClient
+from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.llm_client.config import LLMConfig
-from graphiti_core.embedder.client import EmbedderClient
+from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 
-# ── Config ─────────────────────────────────────────────────────────────────
-NEO4J_URI      = os.getenv("NEO4J_URI",       "bolt://neo4j:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER",      "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD",  "changeme")
-OLLAMA_BASE    = os.getenv("OLLAMA_BASE_URL",  "http://host.docker.internal:11434")
-EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL", "nomic-embed-text")
+# ── Config ──────────────────────────────────────────────────────────────────
+NEO4J_URI      = os.getenv("NEO4J_URI",            "bolt://neo4j:7687")
+NEO4J_USER     = os.getenv("NEO4J_USER",           "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD",       "changeme")
+OLLAMA_BASE    = os.getenv("OLLAMA_BASE_URL",       "http://host.docker.internal:11434")
+EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL",  "nomic-embed-text")
 LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "qwen2.5:1.5b")
 
+OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
-# ── Ollama embedder ────────────────────────────────────────────────────────
-class OllamaEmbedder(EmbedderClient):
-    """Thin wrapper around Ollama /api/embeddings for Graphiti."""
-
-    def __init__(self, base_url: str, model: str) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.model    = model
-
-    async def create(self, input: str | list[str]) -> list[list[float]]:
-        texts = [input] if isinstance(input, str) else input
-        async with httpx.AsyncClient(timeout=60) as client:
-            results = []
-            for text in texts:
-                resp = await client.post(
-                    f"{self.base_url}/api/embeddings",
-                    json={"model": self.model, "prompt": text},
-                )
-                resp.raise_for_status()
-                results.append(resp.json()["embedding"])
-        return results
-
-
-# ── Ollama LLM client ──────────────────────────────────────────────────────
-class OllamaLLMClient(LLMClient):
-    """Thin wrapper around Ollama /api/chat for Graphiti entity extraction."""
-
-    def __init__(self, base_url: str, model: str) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.model    = model
-        config = LLMConfig(model=model)
-        super().__init__(config)
-
-    async def _generate_response(
-        self,
-        messages: list[dict],
-        response_model=None,
-        **kwargs,
-    ) -> str:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model":    self.model,
-                    "messages": messages,
-                    "stream":   False,
-                    "options":  {"temperature": 0.0},
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["message"]["content"]
-
-
-# ── App + Graphiti client ──────────────────────────────────────────────────
+# ── App + Graphiti client ────────────────────────────────────────────────────
 app = FastAPI(title="Memory MCP Service", version="2.0.0")
 _graphiti: Graphiti | None = None
 
@@ -98,8 +43,26 @@ _graphiti: Graphiti | None = None
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        embedder  = OllamaEmbedder(base_url=OLLAMA_BASE, model=EMBED_MODEL)
-        llm       = OllamaLLMClient(base_url=OLLAMA_BASE, model=LLM_MODEL)
+        openai_client = openai.AsyncOpenAI(
+            base_url=OLLAMA_OPENAI_BASE,
+            api_key="ollama",  # Ollama ignores the key but openai-python requires it
+        )
+        llm = OpenAIGenericClient(
+            config=LLMConfig(
+                model=LLM_MODEL,
+                small_model=LLM_MODEL,
+                base_url=OLLAMA_OPENAI_BASE,
+                api_key="ollama",
+            )
+        )
+        embedder = OpenAIEmbedder(
+            config=OpenAIEmbedderConfig(
+                embedding_model=EMBED_MODEL,
+                base_url=OLLAMA_OPENAI_BASE,
+                api_key="ollama",
+            ),
+            client=openai_client,
+        )
         _graphiti = Graphiti(
             neo4j_uri=NEO4J_URI,
             neo4j_user=NEO4J_USER,
@@ -111,7 +74,7 @@ async def get_graphiti() -> Graphiti:
     return _graphiti
 
 
-# ── Pydantic models ────────────────────────────────────────────────────────
+# ── Pydantic models ──────────────────────────────────────────────────────────
 class RecallRequest(BaseModel):
     query: str
     limit: int = 10
@@ -132,7 +95,7 @@ class TaskLogRequest(BaseModel):
     notes: str = ""
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────
+# ── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {
