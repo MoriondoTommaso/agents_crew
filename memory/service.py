@@ -4,20 +4,19 @@ graphiti-core 0.3.0 verified:
   Graphiti.__init__(uri, user, password, llm_client=None)
   LLMConfig(model, base_url, api_key)
   OpenAIClient.get_embedder() -> self.client.embeddings
-  embedding call: embedder.create(input=[text], model='text-embedding-3-small') <- intercepted
-  build_indices_and_constraints() hardcodes 1024d + incomplete fulltext indices  <- fully replaced
+  embedding call: embedder.create(input=[text], model=...) <- intercepted
+  build_indices_and_constraints() hardcodes 1024d          <- fully replaced
 
-nomic-embed-text (Ollama) produces 768-dimensional vectors.
-
-Full index list required by graphiti 0.3.0:
-  Vector:   fact_embedding (RELATES_TO), name_embedding (Entity), community_name_embedding (Community)
-  Fulltext: name_and_summary (Entity), episode_content (Episodic), name_and_fact (RELATES_TO)
-  Constraints + property indices: see _build_indices()
+Architecture:
+  LLM (entity extraction) -> FreeLLMAPI on host :3001  (fast, cloud model)
+  Embedder (vectors)      -> Ollama nomic-embed-text    (local 768d)
+  Graph DB                -> Neo4j 5.26                 (local)
 """
 
 import os
 from datetime import datetime, timezone
 
+from openai import AsyncOpenAI
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from graphiti_core import Graphiti
@@ -29,73 +28,73 @@ from graphiti_core.llm_client.config import LLMConfig
 NEO4J_URI      = os.getenv("NEO4J_URI",            "bolt://neo4j:7687")
 NEO4J_USER     = os.getenv("NEO4J_USER",           "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD",       "changeme")
+
+# FreeLLMAPI — LLM for entity extraction (runs on host)
+FREELLM_BASE   = os.getenv("FREELLM_BASE_URL",     "http://host.docker.internal:3001/v1")
+FREELLM_KEY    = os.getenv("FREELLM_API_KEY",      os.getenv("OPENAI_API_KEY", "freellm"))
+LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "claude-3-5-haiku")  # any model FreeLLM exposes
+
+# Ollama — embedder only (local, no cloud needed)
 OLLAMA_BASE    = os.getenv("OLLAMA_BASE_URL",       "http://host.docker.internal:11434")
 EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL",  "nomic-embed-text")
-EMBED_DIM      = int(os.getenv("GRAPHITI_EMBED_DIM", "768"))   # nomic-embed-text = 768
-LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "qwen2.5:1.5b")
+EMBED_DIM      = int(os.getenv("GRAPHITI_EMBED_DIM", "768"))
 
 OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
 
 # ── Embedder proxy ─────────────────────────────────────────────────────────────
 class _EmbedderProxy:
-    """Intercepts embedder.create() and forces model=EMBED_MODEL.
+    """Intercepts embedder.create() and forces model=EMBED_MODEL via Ollama.
 
     Graphiti 0.3.0 hardcodes model='text-embedding-3-small' in
-    nodes.py, edges.py, search.py, utils.py. We override it every call.
+    nodes.py, edges.py, search.py, utils.py. We override it every call
+    and forward to a separate Ollama AsyncOpenAI client.
     """
-    def __init__(self, embeddings, model: str):
-        self._embeddings = embeddings
+    def __init__(self, model: str, base_url: str):
         self._model = model
+        self._client = AsyncOpenAI(api_key="ollama", base_url=base_url)
 
     async def create(self, **kwargs):
         kwargs["model"] = self._model
-        return await self._embeddings.create(**kwargs)
+        return await self._client.embeddings.create(**kwargs)
 
 
 class _PatchedOpenAIClient(OpenAIClient):
+    """OpenAIClient that points LLM at FreeLLMAPI but embeddings at Ollama."""
     def get_embedder(self):
-        return _EmbedderProxy(self.client.embeddings, EMBED_MODEL)
+        return _EmbedderProxy(EMBED_MODEL, OLLAMA_OPENAI_BASE)
 
 
 # ── Index creation (full replacement for graphiti's build_indices_and_constraints) ──
 async def _build_indices(driver, dim: int):
+    """Complete Neo4j index setup for graphiti 0.3.0 with correct vector dimensions."""
     queries = [
-        # ─ Vector indices (dim instead of hardcoded 1024) ────────────────────────
+        # Vector indices
         f"""
         CREATE VECTOR INDEX fact_embedding IF NOT EXISTS
         FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding)
-        OPTIONS {{indexConfig: {{
-            `vector.dimensions`: {dim},
-            `vector.similarity_function`: 'cosine'
-        }}}}
+        OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, `vector.similarity_function`: 'cosine'}}}}
         """,
         f"""
         CREATE VECTOR INDEX name_embedding IF NOT EXISTS
         FOR (n:Entity) ON (n.name_embedding)
-        OPTIONS {{indexConfig: {{
-            `vector.dimensions`: {dim},
-            `vector.similarity_function`: 'cosine'
-        }}}}
+        OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, `vector.similarity_function`: 'cosine'}}}}
         """,
         f"""
         CREATE VECTOR INDEX community_name_embedding IF NOT EXISTS
         FOR (n:Community) ON (n.name_embedding)
-        OPTIONS {{indexConfig: {{
-            `vector.dimensions`: {dim},
-            `vector.similarity_function`: 'cosine'
-        }}}}
+        OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, `vector.similarity_function`: 'cosine'}}}}
         """,
-        # ─ Fulltext indices ───────────────────────────────────────────────────────
+        # Fulltext indices
         "CREATE FULLTEXT INDEX name_and_summary IF NOT EXISTS FOR (n:Entity) ON EACH [n.name, n.summary]",
         "CREATE FULLTEXT INDEX episode_content IF NOT EXISTS FOR (n:Episodic) ON EACH [n.content]",
         "CREATE FULLTEXT INDEX name_and_fact IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON EACH [r.name, r.fact]",
-        # ─ Uniqueness constraints ───────────────────────────────────────────────
+        # Uniqueness constraints
         "CREATE CONSTRAINT entity_uuid IF NOT EXISTS FOR (n:Entity) REQUIRE n.uuid IS UNIQUE",
         "CREATE CONSTRAINT episodic_uuid IF NOT EXISTS FOR (n:Episodic) REQUIRE n.uuid IS UNIQUE",
         "CREATE CONSTRAINT community_uuid IF NOT EXISTS FOR (n:Community) REQUIRE n.uuid IS UNIQUE",
         "CREATE CONSTRAINT relation_uuid IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.uuid IS UNIQUE",
-        # ─ Property indices ────────────────────────────────────────────────────────
+        # Property indices
         "CREATE INDEX entity_group_id IF NOT EXISTS FOR (n:Entity) ON (n.group_id)",
         "CREATE INDEX episodic_group_id IF NOT EXISTS FOR (n:Episodic) ON (n.group_id)",
         "CREATE INDEX community_group_id IF NOT EXISTS FOR (n:Community) ON (n.group_id)",
@@ -116,11 +115,12 @@ _graphiti: Graphiti | None = None
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
+        # LLM -> FreeLLMAPI (fast cloud model for entity extraction)
         llm = _PatchedOpenAIClient(
             config=LLMConfig(
                 model=LLM_MODEL,
-                base_url=OLLAMA_OPENAI_BASE,
-                api_key="ollama",
+                base_url=FREELLM_BASE,
+                api_key=FREELLM_KEY,
             )
         )
         _graphiti = Graphiti(
@@ -129,8 +129,6 @@ async def get_graphiti() -> Graphiti:
             password=NEO4J_PASSWORD,
             llm_client=llm,
         )
-        # Skip graphiti's build_indices_and_constraints() — it hardcodes 1024d.
-        # _build_indices() is our complete replacement with correct dims + all fulltext indices.
         await _build_indices(_graphiti.driver, EMBED_DIM)
     return _graphiti
 
@@ -160,8 +158,8 @@ class TaskLogRequest(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "memory-mcp",
-            "embed_model": EMBED_MODEL, "embed_dim": EMBED_DIM,
-            "llm_model": LLM_MODEL, "ollama_base": OLLAMA_BASE}
+            "llm": f"{FREELLM_BASE} / {LLM_MODEL}",
+            "embedder": f"{OLLAMA_BASE} / {EMBED_MODEL} ({EMBED_DIM}d)"}
 
 
 @app.get("/tools")
