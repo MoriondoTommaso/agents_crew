@@ -5,9 +5,14 @@ graphiti-core 0.3.0 verified:
   LLMConfig(model, base_url, api_key)
   OpenAIClient.get_embedder() -> self.client.embeddings
   embedding call: embedder.create(input=[text], model='text-embedding-3-small') <- intercepted
-  build_indices_and_constraints() hardcodes 1024d + missing fulltext indices    <- fully replaced
+  build_indices_and_constraints() hardcodes 1024d + incomplete fulltext indices  <- fully replaced
 
 nomic-embed-text (Ollama) produces 768-dimensional vectors.
+
+Full index list required by graphiti 0.3.0:
+  Vector:   fact_embedding (RELATES_TO), name_embedding (Entity), community_name_embedding (Community)
+  Fulltext: name_and_summary (Entity), episode_content (Episodic), name_and_fact (RELATES_TO)
+  Constraints + property indices: see _build_indices()
 """
 
 import os
@@ -34,7 +39,11 @@ OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
 # ── Embedder proxy ─────────────────────────────────────────────────────────────
 class _EmbedderProxy:
-    """Intercepts embedder.create() calls and forces model=EMBED_MODEL."""
+    """Intercepts embedder.create() and forces model=EMBED_MODEL.
+
+    Graphiti 0.3.0 hardcodes model='text-embedding-3-small' in
+    nodes.py, edges.py, search.py, utils.py. We override it every call.
+    """
     def __init__(self, embeddings, model: str):
         self._embeddings = embeddings
         self._model = model
@@ -49,17 +58,10 @@ class _PatchedOpenAIClient(OpenAIClient):
         return _EmbedderProxy(self.client.embeddings, EMBED_MODEL)
 
 
-# ── Index creation (replaces graphiti's hardcoded version) ─────────────────────
+# ── Index creation (full replacement for graphiti's build_indices_and_constraints) ──
 async def _build_indices(driver, dim: int):
-    """Full replacement for graphiti_core's build_indices_and_constraints.
-
-    Includes:
-    - Vector indices with correct dimensions (dim instead of hardcoded 1024)
-    - Fulltext indices (name_and_summary, episode_content) that Graphiti expects
-    - All uniqueness constraints and regular property indices
-    """
     queries = [
-        # ─ Vector indices ──────────────────────────────────────────────────────────
+        # ─ Vector indices (dim instead of hardcoded 1024) ────────────────────────
         f"""
         CREATE VECTOR INDEX fact_embedding IF NOT EXISTS
         FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding)
@@ -85,14 +87,9 @@ async def _build_indices(driver, dim: int):
         }}}}
         """,
         # ─ Fulltext indices ───────────────────────────────────────────────────────
-        """
-        CREATE FULLTEXT INDEX name_and_summary IF NOT EXISTS
-        FOR (n:Entity) ON EACH [n.name, n.summary]
-        """,
-        """
-        CREATE FULLTEXT INDEX episode_content IF NOT EXISTS
-        FOR (n:Episodic) ON EACH [n.content]
-        """,
+        "CREATE FULLTEXT INDEX name_and_summary IF NOT EXISTS FOR (n:Entity) ON EACH [n.name, n.summary]",
+        "CREATE FULLTEXT INDEX episode_content IF NOT EXISTS FOR (n:Episodic) ON EACH [n.content]",
+        "CREATE FULLTEXT INDEX name_and_fact IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON EACH [r.name, r.fact]",
         # ─ Uniqueness constraints ───────────────────────────────────────────────
         "CREATE CONSTRAINT entity_uuid IF NOT EXISTS FOR (n:Entity) REQUIRE n.uuid IS UNIQUE",
         "CREATE CONSTRAINT episodic_uuid IF NOT EXISTS FOR (n:Episodic) REQUIRE n.uuid IS UNIQUE",
@@ -133,7 +130,7 @@ async def get_graphiti() -> Graphiti:
             llm_client=llm,
         )
         # Skip graphiti's build_indices_and_constraints() — it hardcodes 1024d.
-        # Our _build_indices() uses correct EMBED_DIM and includes fulltext indices.
+        # _build_indices() is our complete replacement with correct dims + all fulltext indices.
         await _build_indices(_graphiti.driver, EMBED_DIM)
     return _graphiti
 
