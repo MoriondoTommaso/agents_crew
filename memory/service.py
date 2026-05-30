@@ -1,5 +1,6 @@
 """Graphiti Memory MCP Service — port 8002"""
 
+import asyncio
 import os
 import traceback
 import logging
@@ -30,7 +31,6 @@ EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL",  "nomic-embed-text")
 EMBED_DIM      = int(os.getenv("GRAPHITI_EMBED_DIM", "768"))
 OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
-# All episodes and searches use this group_id for consistent filtering
 GROUP_ID       = os.getenv("GRAPHITI_GROUP_ID", "agents")
 
 
@@ -76,29 +76,33 @@ async def _build_indices(driver, dim: int):
         await driver.execute_query(q.strip())
 
 
-# ── App + Graphiti singleton ────────────────────────────────────────────────────
-app = FastAPI(title="Memory MCP Service", version="2.2.0")
+# ── App + Graphiti singleton (async-safe) ─────────────────────────────────────
+app = FastAPI(title="Memory MCP Service", version="2.3.0")
 _graphiti: Graphiti | None = None
+_graphiti_lock = asyncio.Lock()
 
 
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        logger.info("Initializing Graphiti: LLM=%s @ %s group_id=%s", LLM_MODEL, FREELLM_BASE, GROUP_ID)
-        llm = _PatchedOpenAIClient(
-            config=LLMConfig(
-                model=LLM_MODEL,
-                base_url=FREELLM_BASE,
-                api_key=FREELLM_KEY,
-            )
-        )
-        _graphiti = Graphiti(
-            uri=NEO4J_URI,
-            user=NEO4J_USER,
-            password=NEO4J_PASSWORD,
-            llm_client=llm,
-        )
-        await _build_indices(_graphiti.driver, EMBED_DIM)
+        async with _graphiti_lock:
+            if _graphiti is None:  # double-checked locking
+                logger.info("Initializing Graphiti: LLM=%s @ %s group_id=%s", LLM_MODEL, FREELLM_BASE, GROUP_ID)
+                llm = _PatchedOpenAIClient(
+                    config=LLMConfig(
+                        model=LLM_MODEL,
+                        base_url=FREELLM_BASE,
+                        api_key=FREELLM_KEY,
+                    )
+                )
+                g = Graphiti(
+                    uri=NEO4J_URI,
+                    user=NEO4J_USER,
+                    password=NEO4J_PASSWORD,
+                    llm_client=llm,
+                )
+                await _build_indices(g.driver, EMBED_DIM)
+                _graphiti = g
     return _graphiti
 
 
@@ -126,7 +130,7 @@ class TaskLogRequest(BaseModel):
 # ── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "memory-mcp", "version": "2.2.0",
+    return {"status": "ok", "service": "memory-mcp", "version": "2.3.0",
             "llm": f"{FREELLM_BASE} / {LLM_MODEL}",
             "embedder": f"{OLLAMA_BASE} / {EMBED_MODEL} ({EMBED_DIM}d)",
             "group_id": GROUP_ID}
@@ -139,7 +143,7 @@ async def list_tools():
         {"name": "memory_add_episode", "description": "Ingest a new episode into the graph.",            "parameters": {"name": "string", "content": "string", "source": "string"}},
         {"name": "memory_get_context", "description": "Retrieve all graph facts for a specific entity.", "parameters": {"entity": "string"}},
         {"name": "memory_task_log",    "description": "Log a completed or failed task.",                 "parameters": {"task": "string", "status": "string", "files_modified": "list", "decisions": "list", "notes": "string"}},
-        {"name": "memory_snapshot",    "description": "Export the full knowledge graph (debug).",        "parameters": {}},
+        {"name": "memory_snapshot",    "description": "Export raw facts from the knowledge graph (debug).", "parameters": {}},
     ]}
 
 

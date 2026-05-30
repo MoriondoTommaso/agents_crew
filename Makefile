@@ -18,17 +18,16 @@ build:
 logs:
 	docker compose logs -f
 
-# ── OpenCode agent ────────────────────────────────────────────────────────────────
-# OpenCode reads OPENAI_BASE_URL + OPENAI_API_KEY from env.
-# Swap those two vars in .env to use any other OpenAI-compatible endpoint.
+# ── OpenCode agent ───────────────────────────────────────────────────────────────
 opencode:
-	@echo "Starting OpenCode (OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://localhost:3001/v1}) ..."
-	@export $$(grep -v '^#' .env | xargs) 2>/dev/null; \
+	@if [ ! -f .env ]; then echo "ERROR: .env file not found. Copy .env.example to .env and fill in your keys."; exit 1; fi
+	@echo "Starting OpenCode (OPENAI_BASE_URL=$$(grep OPENAI_BASE_URL .env | cut -d= -f2)) ..."
+	@export $$(grep -v '^#' .env | grep -v '^$$' | xargs) 2>/dev/null; \
 		OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://localhost:3001/v1} \
 		OPENAI_API_KEY=$${OPENAI_API_KEY} \
 		opencode
 
-# ── FreeLLMAPI server (runs on host, not in Docker) ────────────────────────────────
+# ── FreeLLMAPI server (runs on host, not in Docker) ────────────────────────────
 freellm:
 	@echo "Starting FreeLLMAPI server on :3001 ..."
 	@echo "Dashboard: http://localhost:5173"
@@ -39,9 +38,7 @@ freellm:
 	fi
 	cd ../freellmapi && npm run dev
 
-# ── Memory bootstrap (run once after first make up) ──────────────────────────────
-# LLM entity extraction -> FreeLLMAPI (host :3001, model=auto)
-# Embedder             -> Ollama nomic-embed-text (local)
+# ── Memory bootstrap (run once after first make up) ────────────────────────────
 bootstrap:
 	@echo "Pulling Ollama embedder model ..."
 	ollama pull nomic-embed-text
@@ -49,14 +46,15 @@ bootstrap:
 	docker compose exec memory python bootstrap.py
 	@echo "Bootstrap complete."
 
-# ── Ollama model management ─────────────────────────────────────────────────────────
+# ── Ollama model management ───────────────────────────────────────────────────────────
 models:
 	@echo "Pulling Ollama embedder model ..."
 	ollama pull nomic-embed-text
 	@echo "Model ready."
 
-# ── Pre-flight dependency check ───────────────────────────────────────────────────────
+# ── Pre-flight dependency check ─────────────────────────────────────────────────────────
 check-deps:
+	@if [ ! -f .env ]; then echo "ERROR: .env file not found. Copy .env.example to .env and fill in your keys."; exit 1; fi
 	@echo "Checking host dependencies ..."
 	@command -v opencode > /dev/null 2>&1 \
 		&& echo "  ✓ OpenCode installed" \
@@ -67,7 +65,7 @@ check-deps:
 		|| (echo "  ✗ Ollama NOT reachable — run: ollama serve" && exit 1)
 	@echo "  ✓ All deps OK."
 
-# ── Cleanup ─────────────────────────────────────────────────────────────────────────────
+# ── Cleanup ─────────────────────────────────────────────────────────────────────────────────
 clean:
 	docker compose down -v --remove-orphans
 	docker image prune -f
