@@ -1,6 +1,6 @@
 .PHONY: up down build logs opencode freellm bootstrap check-deps clean models
 
-# ── Docker stack ──────────────────────────────────────────────────────────────
+# ── Docker stack ──────────────────────────────────────────────────────────────────
 up: check-deps
 	docker compose up --build -d
 	@echo ""
@@ -18,7 +18,7 @@ build:
 logs:
 	docker compose logs -f
 
-# ── OpenCode agent ────────────────────────────────────────────────────────────
+# ── OpenCode agent ────────────────────────────────────────────────────────────────
 # OpenCode reads OPENAI_BASE_URL + OPENAI_API_KEY from env.
 # Swap those two vars in .env to use any other OpenAI-compatible endpoint.
 opencode:
@@ -28,7 +28,7 @@ opencode:
 		OPENAI_API_KEY=$${OPENAI_API_KEY} \
 		opencode
 
-# ── FreeLLMAPI server (runs on host, not in Docker) ───────────────────────────
+# ── FreeLLMAPI server (runs on host, not in Docker) ────────────────────────────────
 freellm:
 	@echo "Starting FreeLLMAPI server on :3001 ..."
 	@echo "Dashboard: http://localhost:5173"
@@ -39,23 +39,23 @@ freellm:
 	fi
 	cd ../freellmapi && npm run dev
 
-# ── Memory bootstrap (run once after first make up) ───────────────────────────
+# ── Memory bootstrap (run once after first make up) ──────────────────────────────
+# LLM entity extraction -> FreeLLMAPI (host :3001, model=auto)
+# Embedder             -> Ollama nomic-embed-text (local)
 bootstrap:
-	@echo "Pulling Ollama models required by memory service ..."
+	@echo "Pulling Ollama embedder model ..."
 	ollama pull nomic-embed-text
-	ollama pull qwen2.5:1.5b
 	@echo "Seeding knowledge graph from codebase ..."
 	docker compose exec memory python bootstrap.py
 	@echo "Bootstrap complete."
 
-# ── Ollama model management ───────────────────────────────────────────────────
+# ── Ollama model management ─────────────────────────────────────────────────────────
 models:
-	@echo "Pulling all required Ollama models ..."
+	@echo "Pulling Ollama embedder model ..."
 	ollama pull nomic-embed-text
-	ollama pull qwen2.5:1.5b
-	@echo "All models ready."
+	@echo "Model ready."
 
-# ── Pre-flight dependency check ───────────────────────────────────────────────
+# ── Pre-flight dependency check ───────────────────────────────────────────────────────
 check-deps:
 	@echo "Checking host dependencies ..."
 	@command -v opencode > /dev/null 2>&1 \
@@ -67,7 +67,7 @@ check-deps:
 		|| (echo "  ✗ Ollama NOT reachable — run: ollama serve" && exit 1)
 	@echo "  ✓ All deps OK."
 
-# ── Cleanup ───────────────────────────────────────────────────────────────────
+# ── Cleanup ─────────────────────────────────────────────────────────────────────────────
 clean:
 	docker compose down -v --remove-orphans
 	docker image prune -f
