@@ -30,6 +30,9 @@ EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL",  "nomic-embed-text")
 EMBED_DIM      = int(os.getenv("GRAPHITI_EMBED_DIM", "768"))
 OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
+# All episodes and searches use this group_id for consistent filtering
+GROUP_ID       = os.getenv("GRAPHITI_GROUP_ID", "agents")
+
 
 # ── Embedder proxy ────────────────────────────────────────────────────────────
 class _EmbedderProxy:
@@ -74,14 +77,14 @@ async def _build_indices(driver, dim: int):
 
 
 # ── App + Graphiti singleton ────────────────────────────────────────────────────
-app = FastAPI(title="Memory MCP Service", version="2.1.0")
+app = FastAPI(title="Memory MCP Service", version="2.2.0")
 _graphiti: Graphiti | None = None
 
 
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        logger.info("Initializing Graphiti: LLM=%s @ %s", LLM_MODEL, FREELLM_BASE)
+        logger.info("Initializing Graphiti: LLM=%s @ %s group_id=%s", LLM_MODEL, FREELLM_BASE, GROUP_ID)
         llm = _PatchedOpenAIClient(
             config=LLMConfig(
                 model=LLM_MODEL,
@@ -123,9 +126,10 @@ class TaskLogRequest(BaseModel):
 # ── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "memory-mcp",
+    return {"status": "ok", "service": "memory-mcp", "version": "2.2.0",
             "llm": f"{FREELLM_BASE} / {LLM_MODEL}",
-            "embedder": f"{OLLAMA_BASE} / {EMBED_MODEL} ({EMBED_DIM}d)"}
+            "embedder": f"{OLLAMA_BASE} / {EMBED_MODEL} ({EMBED_DIM}d)",
+            "group_id": GROUP_ID}
 
 
 @app.get("/tools")
@@ -143,7 +147,7 @@ async def list_tools():
 async def memory_recall(req: RecallRequest):
     g = await get_graphiti()
     try:
-        results = await g.search(req.query, num_results=req.limit)
+        results = await g.search(req.query, num_results=req.limit, group_ids=[GROUP_ID])
         facts = [
             {"uuid": str(r.uuid), "fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None}
             for r in results
@@ -164,6 +168,7 @@ async def memory_add_episode(req: EpisodeRequest):
             source=EpisodeType.text,
             source_description=req.source,
             reference_time=datetime.now(timezone.utc),
+            group_id=GROUP_ID,
         )
         return {"status": "ok", "episode": req.name}
     except Exception as e:
@@ -175,7 +180,11 @@ async def memory_add_episode(req: EpisodeRequest):
 async def memory_get_context(req: ContextRequest):
     g = await get_graphiti()
     try:
-        results = await g.search(f"context and relationships for {req.entity}", num_results=20)
+        results = await g.search(
+            f"context and relationships for {req.entity}",
+            num_results=20,
+            group_ids=[GROUP_ID],
+        )
         return {
             "entity": req.entity,
             "facts": [{"fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None} for r in results],
@@ -202,6 +211,7 @@ async def memory_task_log(req: TaskLogRequest):
             source=EpisodeType.text,
             source_description="agent_task_log",
             reference_time=datetime.now(timezone.utc),
+            group_id=GROUP_ID,
         )
         return {"status": "logged", "task": req.task, "task_status": req.status}
     except Exception as e:
@@ -211,13 +221,22 @@ async def memory_task_log(req: TaskLogRequest):
 
 @app.get("/mcp/memory_snapshot")
 async def memory_snapshot():
+    """Return raw facts from Neo4j directly (bypasses Graphiti search quirks)."""
     g = await get_graphiti()
     try:
-        results = await g.search("*", num_results=200)
-        return {
-            "total_facts": len(results),
-            "facts": [{"fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None} for r in results],
-        }
+        records, _, _ = await g.driver.execute_query(
+            """
+            MATCH ()-[r:RELATES_TO]->()
+            RETURN r.fact AS fact, r.valid_at AS valid_at, r.group_id AS group_id
+            ORDER BY r.created_at DESC
+            LIMIT 200
+            """
+        )
+        facts = [
+            {"fact": r["fact"], "valid_at": str(r["valid_at"]) if r["valid_at"] else None, "group_id": r["group_id"]}
+            for r in records
+        ]
+        return {"total_facts": len(facts), "facts": facts}
     except Exception as e:
         logger.error("memory_snapshot error: %s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
