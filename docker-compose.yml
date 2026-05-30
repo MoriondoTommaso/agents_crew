@@ -1,56 +1,29 @@
 # docker-compose.yml
-# Claude Code coding agent stack
+# Coding agent stack — FreeLLMAPI + OpenCode edition
 #
-#   litellm   — Anthropic→OpenAI proxy, routes frontier/local (port 4000)
-#   neo4j     — Graph database for Graphiti memory (ports 7474 7687)
-#   memory    — Graphiti knowledge-graph MCP service (port 8002)
+#   neo4j   — Graph database for Graphiti memory (ports 7474 7687)
+#   memory  — Graphiti knowledge-graph MCP service (port 8002)
 #
-# Claude Code CLI runs on the HOST (Mac), not in Docker.
-# It connects to LiteLLM via ANTHROPIC_BASE_URL=http://localhost:4000
-# and to memory via MCP at http://localhost:8002
+# LLM routing is handled by FreeLLMAPI running on the HOST (not Docker).
+# OpenCode CLI runs on the HOST and speaks OpenAI format to FreeLLMAPI.
 #
 # Prerequisites (host machine):
-#   ollama serve                  # Ollama on port 11434
-#   ollama pull nomic-embed-text  # embedding model (~274MB)
-#   ollama pull qwen2.5:1.5b      # entity extraction model
-#   ollama pull qwen2.5-coder:14b # code generation model
+#   cd ../freellmapi && npm run dev   # FreeLLMAPI on :3001
+#   ollama serve                      # Ollama on :11434
+#   ollama pull nomic-embed-text
+#   ollama pull qwen2.5:1.5b
 #
 # Usage:
-#   make up        → start all 3 services
-#   make bootstrap → seed knowledge graph from codebase (run once)
-#   make claude    → launch Claude Code in current directory
+#   make up        → start neo4j + memory
+#   make bootstrap → seed knowledge graph (run once)
+#   make opencode  → launch OpenCode agent
+#   make freellm   → start FreeLLMAPI server
 #   make logs      → follow all logs
 #   make down      → stop everything
 
 services:
 
-  # ── 1. LiteLLM proxy ──────────────────────────────────────────────────────
-  litellm:
-    image: ghcr.io/berriai/litellm:main-latest
-    container_name: litellm
-    restart: unless-stopped
-    ports:
-      - "4000:4000"
-    volumes:
-      - ./litellm/config.yaml:/app/config.yaml:ro
-    env_file:
-      - .env
-    environment:
-      FREELLM_BASE_URL: ${FREELLM_BASE_URL:-http://host.docker.internal:3001/v1}
-      FREELLMAPI_KEY:   ${FREELLMAPI_KEY:-none}
-      OLLAMA_BASE_URL:  ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local}
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--detailed_debug"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:4000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
-  # ── 2. Neo4j graph database ────────────────────────────────────────────────
+  # ── 1. Neo4j graph database ──────────────────────────────────────────────
   neo4j:
     image: neo4j:5.26-community
     container_name: neo4j
@@ -65,9 +38,6 @@ services:
     volumes:
       - neo4j-data:/data
       - neo4j-logs:/logs
-    # Neo4j 5.x: healthcheck via HTTP API (porta 7474) — non usa cypher-shell
-    # che può non essere nel PATH o fallire prima che il DB sia pronto.
-    # start_period alto perché al primo avvio scarica il plugin APOC.
     healthcheck:
       test: ["CMD", "wget", "-qO", "-", "http://localhost:7474"]
       interval: 15s
@@ -75,7 +45,7 @@ services:
       retries: 10
       start_period: 60s
 
-  # ── 3. Graphiti Memory MCP service ────────────────────────────────────────
+  # ── 2. Graphiti Memory MCP service ───────────────────────────────────────
   memory:
     build:
       context: ./memory
@@ -88,12 +58,12 @@ services:
     env_file:
       - .env
     environment:
-      NEO4J_URI:             bolt://neo4j:7687
-      NEO4J_USER:            neo4j
-      NEO4J_PASSWORD:        ${NEO4J_PASSWORD:-changeme}
-      OLLAMA_BASE_URL:       ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      GRAPHITI_EMBED_MODEL:  ${GRAPHITI_EMBED_MODEL:-nomic-embed-text}
-      GRAPHITI_LLM_MODEL:    ${GRAPHITI_LLM_MODEL:-qwen2.5:1.5b}
+      NEO4J_URI:            bolt://neo4j:7687
+      NEO4J_USER:           neo4j
+      NEO4J_PASSWORD:       ${NEO4J_PASSWORD:-changeme}
+      OLLAMA_BASE_URL:      ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      GRAPHITI_EMBED_MODEL: ${GRAPHITI_EMBED_MODEL:-nomic-embed-text}
+      GRAPHITI_LLM_MODEL:   ${GRAPHITI_LLM_MODEL:-qwen2.5:1.5b}
     depends_on:
       neo4j:
         condition: service_healthy
