@@ -7,7 +7,7 @@ Run once after `make up` to populate the graph with existing code structure:
 What it does:
   1. Walks /workspace looking for .py files (skips venv, __pycache__, .git)
   2. For each file: AST-parses classes, functions, imports
-  3. Ingests one episode per file into Graphiti
+  3. Ingests one episode per file into Graphiti (with delay for rate limits)
   4. Ingests one episode per key decision from MEMORY.md if it exists
 """
 
@@ -19,18 +19,19 @@ from pathlib import Path
 
 import httpx
 
-MEMORY_BASE = os.getenv("MEMORY_SERVICE_URL", "http://localhost:8002")
-WORKSPACE   = Path(os.getenv("WORKSPACE_ROOT", "/workspace"))
+MEMORY_BASE     = os.getenv("MEMORY_SERVICE_URL", "http://localhost:8002")
+WORKSPACE       = Path(os.getenv("WORKSPACE_ROOT", "/workspace"))
+INGEST_TIMEOUT  = int(os.getenv("BOOTSTRAP_TIMEOUT", "300"))
 
-# Large local models (14b+) can take several minutes for entity extraction.
-# Set a generous timeout so bootstrap doesn't abort on slow hardware.
-INGEST_TIMEOUT = int(os.getenv("BOOTSTRAP_TIMEOUT", "300"))
+# Delay between episodes (seconds). Free-tier LLM providers (OpenRouter, Groq)
+# have rate limits of ~20 req/min. Graphiti uses ~6 LLM calls per episode.
+# 35s gives comfortable headroom; set to 0 if using a paid plan.
+EPISODE_DELAY   = int(os.getenv("BOOTSTRAP_EPISODE_DELAY", "35"))
 
 SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".mypy_cache", ".pytest_cache"}
 
 
 def extract_symbols(path: Path) -> dict:
-    """Return classes, functions, imports found in a Python file."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
     except SyntaxError:
@@ -53,7 +54,7 @@ def build_episode(rel_path: str, symbols: dict) -> str:
     if symbols.get("classes"):
         lines.append(f"Classes: {', '.join(symbols['classes'])}")
     if symbols.get("functions"):
-        lines.append(f"Functions: {', '.join(symbols['functions'][:20])}")  # cap at 20
+        lines.append(f"Functions: {', '.join(symbols['functions'][:20])}")
     if symbols.get("imports"):
         lines.append(f"Imports: {', '.join(set(symbols['imports'][:15]))}")
     return "\n".join(lines)
@@ -79,9 +80,12 @@ async def main():
 
     print(f"[bootstrap] Found {len(py_files)} Python files")
     print(f"[bootstrap] Timeout per episode: {INGEST_TIMEOUT}s")
+    if EPISODE_DELAY > 0:
+        print(f"[bootstrap] Delay between episodes: {EPISODE_DELAY}s (set BOOTSTRAP_EPISODE_DELAY=0 for paid plans)")
+    est = len(py_files) * (EPISODE_DELAY + 30) // 60
+    print(f"[bootstrap] Estimated time: ~{max(1, est)} min")
 
     async with httpx.AsyncClient() as client:
-        # Wait for memory service
         for _ in range(10):
             try:
                 r = await client.get(f"{MEMORY_BASE}/health", timeout=5)
@@ -93,22 +97,27 @@ async def main():
         else:
             raise RuntimeError("Memory service not reachable")
 
-        # Ingest Python files
-        for path in py_files:
+        total = len(py_files)
+        for i, path in enumerate(py_files, 1):
             rel = str(path.relative_to(WORKSPACE))
             symbols = extract_symbols(path)
             if not symbols:
                 continue
             content = build_episode(rel, symbols)
-            print(f"  ⧗ ingesting {rel} ...", end=" ", flush=True)
+            print(f"  [{i}/{total}] ingesting {rel} ...", end=" ", flush=True)
             await ingest_episode(client, f"file:{rel}", content, source="bootstrap")
             print("✓")
+            if EPISODE_DELAY > 0 and i < total:
+                print(f"  ⏳ waiting {EPISODE_DELAY}s for rate limit ...")
+                await asyncio.sleep(EPISODE_DELAY)
 
-        # Ingest MEMORY.md if present
         memory_md = WORKSPACE / "MEMORY.md"
         if memory_md.exists():
+            if EPISODE_DELAY > 0:
+                print(f"  ⏳ waiting {EPISODE_DELAY}s before MEMORY.md ...")
+                await asyncio.sleep(EPISODE_DELAY)
             content = memory_md.read_text(encoding="utf-8")
-            print(f"  ⧗ ingesting MEMORY.md ...", end=" ", flush=True)
+            print(f"  [{total+1}/{total+1}] ingesting MEMORY.md ...", end=" ", flush=True)
             await ingest_episode(client, "MEMORY.md", content, source="bootstrap")
             print("✓")
 
