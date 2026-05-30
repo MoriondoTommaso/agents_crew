@@ -22,6 +22,10 @@ import httpx
 MEMORY_BASE = os.getenv("MEMORY_SERVICE_URL", "http://localhost:8002")
 WORKSPACE   = Path(os.getenv("WORKSPACE_ROOT", "/workspace"))
 
+# Large local models (14b+) can take several minutes for entity extraction.
+# Set a generous timeout so bootstrap doesn't abort on slow hardware.
+INGEST_TIMEOUT = int(os.getenv("BOOTSTRAP_TIMEOUT", "300"))
+
 SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".mypy_cache", ".pytest_cache"}
 
 
@@ -59,7 +63,7 @@ async def ingest_episode(client: httpx.AsyncClient, name: str, content: str, sou
     resp = await client.post(
         f"{MEMORY_BASE}/mcp/memory_add_episode",
         json={"name": name, "content": content, "source": source},
-        timeout=30,
+        timeout=INGEST_TIMEOUT,
     )
     resp.raise_for_status()
 
@@ -74,6 +78,7 @@ async def main():
                 py_files.append(Path(root) / f)
 
     print(f"[bootstrap] Found {len(py_files)} Python files")
+    print(f"[bootstrap] Timeout per episode: {INGEST_TIMEOUT}s")
 
     async with httpx.AsyncClient() as client:
         # Wait for memory service
@@ -95,15 +100,17 @@ async def main():
             if not symbols:
                 continue
             content = build_episode(rel, symbols)
+            print(f"  ⧗ ingesting {rel} ...", end=" ", flush=True)
             await ingest_episode(client, f"file:{rel}", content, source="bootstrap")
-            print(f"  ✓ {rel}")
+            print("✓")
 
         # Ingest MEMORY.md if present
         memory_md = WORKSPACE / "MEMORY.md"
         if memory_md.exists():
             content = memory_md.read_text(encoding="utf-8")
+            print(f"  ⧗ ingesting MEMORY.md ...", end=" ", flush=True)
             await ingest_episode(client, "MEMORY.md", content, source="bootstrap")
-            print("  ✓ MEMORY.md ingested")
+            print("✓")
 
     print("[bootstrap] Done.")
 
