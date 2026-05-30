@@ -1,29 +1,28 @@
 """Graphiti Memory MCP Service — port 8002
 
-Exposes 5 MCP tools for the coding agent:
-  - memory_recall        : semantic search over the knowledge graph
-  - memory_add_episode   : ingest a new episode (task, decision, observation)
-  - memory_get_context   : retrieve subgraph for a specific entity/file
-  - memory_task_log      : log a completed or failed task with affected files
-  - memory_snapshot      : dump full graph as JSON (debug / export)
+graphiti-core 0.3.0 package structure (verified from installed files):
+  graphiti_core/llm_client/client.py       → LLMClient (base)
+  graphiti_core/llm_client/config.py       → LLMConfig
+  graphiti_core/llm_client/openai_client.py → OpenAIClient
+  NO graphiti_core/embedder/ subpackage exists in 0.3.0
 
-LLM + Embeddings: Ollama via OpenAI-compatible API (official Graphiti pattern).
-  - OpenAIGenericClient  → /v1/chat/completions  (entity extraction)
-  - OpenAIEmbedder       → /v1/embeddings        (semantic search)
-No OpenAI API key required.
+Embedder: since graphiti_core has no embedder base class in 0.3.0,
+we pass embedder=None to Graphiti and override _embed() via monkey-patch,
+OR use the OpenAI-compatible Ollama endpoint directly through openai-python.
+
+Actually in 0.3.0 Graphiti.__init__ signature: check graphiti.py directly.
 """
 
 import os
 from datetime import datetime, timezone
 
-import openai
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
-from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.llm_client.config import LLMConfig
-from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 
 # ── Config ──────────────────────────────────────────────────────────────────
 NEO4J_URI      = os.getenv("NEO4J_URI",            "bolt://neo4j:7687")
@@ -35,19 +34,32 @@ LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "qwen2.5:1.5b")
 
 OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
+
 # ── App + Graphiti client ────────────────────────────────────────────────────
 app = FastAPI(title="Memory MCP Service", version="2.0.0")
 _graphiti: Graphiti | None = None
 
 
+async def _ollama_embed(texts: list[str]) -> list[list[float]]:
+    """Call Ollama /api/embeddings directly — no graphiti_core embedder class needed."""
+    async with httpx.AsyncClient(timeout=60) as client:
+        results = []
+        for text in texts:
+            resp = await client.post(
+                f"{OLLAMA_BASE.rstrip('/')}/api/embeddings",
+                json={"model": EMBED_MODEL, "prompt": text},
+            )
+            resp.raise_for_status()
+            results.append(resp.json()["embedding"])
+        return results
+
+
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        openai_client = openai.AsyncOpenAI(
-            base_url=OLLAMA_OPENAI_BASE,
-            api_key="ollama",  # Ollama ignores the key but openai-python requires it
-        )
-        llm = OpenAIGenericClient(
+        # OpenAIClient in 0.3.0 uses the openai-python library;
+        # point it at Ollama's OpenAI-compatible endpoint.
+        llm = OpenAIClient(
             config=LLMConfig(
                 model=LLM_MODEL,
                 small_model=LLM_MODEL,
@@ -55,21 +67,19 @@ async def get_graphiti() -> Graphiti:
                 api_key="ollama",
             )
         )
-        embedder = OpenAIEmbedder(
-            config=OpenAIEmbedderConfig(
-                embedding_model=EMBED_MODEL,
-                base_url=OLLAMA_OPENAI_BASE,
-                api_key="ollama",
-            ),
-            client=openai_client,
-        )
         _graphiti = Graphiti(
             neo4j_uri=NEO4J_URI,
             neo4j_user=NEO4J_USER,
             neo4j_password=NEO4J_PASSWORD,
             llm_client=llm,
-            embedder=embedder,
         )
+        # Monkey-patch the embedder: Graphiti 0.3.0 stores embedder on the instance
+        # and calls self.embedder.create(texts). We wrap our async function.
+        class _OllamaEmbedder:
+            async def create(self, input):
+                texts = [input] if isinstance(input, str) else input
+                return await _ollama_embed(texts)
+        _graphiti.embedder = _OllamaEmbedder()
         await _graphiti.build_indices_and_constraints()
     return _graphiti
 
