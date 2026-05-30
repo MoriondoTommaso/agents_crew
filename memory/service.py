@@ -1,14 +1,18 @@
 """Graphiti Memory MCP Service — port 8002
 
-graphiti-core 0.3.0 verified signatures:
-  Graphiti.__init__(self, uri, user, password, llm_client=None)
-  LLMConfig.__init__(model, base_url, api_key)  # no small_model
+graphiti-core 0.3.0 verified:
+  Graphiti.__init__(uri, user, password, llm_client=None)
+  LLMConfig(model, base_url, api_key)              # no small_model
+  OpenAIClient.get_embedder() -> self.client.embeddings
+  embedding call: embedder.create(input=[text], model='text-embedding-3-small')  <- we intercept this
+
+Fix: wrap client.embeddings with _EmbedderProxy that forces model=EMBED_MODEL
+before forwarding to Ollama /v1/embeddings (OpenAI-compatible).
 """
 
 import os
 from datetime import datetime, timezone
 
-import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from graphiti_core import Graphiti
@@ -27,32 +31,40 @@ LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "qwen2.5:1.5b")
 OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
 
 
+# ── Embedder proxy ─────────────────────────────────────────────────────────────
+class _EmbedderProxy:
+    """Wraps openai.resources.AsyncEmbeddings and forces model=EMBED_MODEL.
+
+    Graphiti 0.3.0 calls embedder.create(input=[text], model='text-embedding-3-small')
+    from nodes.py, edges.py, search.py and utils.py. We intercept every call and
+    substitute the model with our local Ollama embedding model before forwarding.
+    """
+    def __init__(self, embeddings, model: str):
+        self._embeddings = embeddings
+        self._model = model
+
+    async def create(self, **kwargs):
+        kwargs["model"] = self._model   # always override, whatever Graphiti passes
+        return await self._embeddings.create(**kwargs)
+
+
+class _PatchedOpenAIClient(OpenAIClient):
+    """OpenAIClient whose get_embedder() returns an _EmbedderProxy."""
+    def get_embedder(self):
+        return _EmbedderProxy(self.client.embeddings, EMBED_MODEL)
+
+
 # ── App + Graphiti client ────────────────────────────────────────────────────
 app = FastAPI(title="Memory MCP Service", version="2.0.0")
 _graphiti: Graphiti | None = None
 
 
-async def _ollama_embed(texts: list[str]) -> list[list[float]]:
-    """Call Ollama /api/embeddings directly."""
-    async with httpx.AsyncClient(timeout=60) as client:
-        results = []
-        for text in texts:
-            resp = await client.post(
-                f"{OLLAMA_BASE.rstrip('/')}/api/embeddings",
-                json={"model": EMBED_MODEL, "prompt": text},
-            )
-            resp.raise_for_status()
-            results.append(resp.json()["embedding"])
-        return results
-
-
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        # Verified signature for graphiti-core 0.3.0:
-        #   LLMConfig(model, base_url, api_key)
-        #   Graphiti(uri, user, password, llm_client)
-        llm = OpenAIClient(
+        # Both LLM and embeddings hit Ollama via its OpenAI-compatible /v1 endpoint.
+        # _PatchedOpenAIClient overrides get_embedder() to force model=nomic-embed-text.
+        llm = _PatchedOpenAIClient(
             config=LLMConfig(
                 model=LLM_MODEL,
                 base_url=OLLAMA_OPENAI_BASE,
@@ -65,11 +77,6 @@ async def get_graphiti() -> Graphiti:
             password=NEO4J_PASSWORD,
             llm_client=llm,
         )
-        class _OllamaEmbedder:
-            async def create(self, input):
-                texts = [input] if isinstance(input, str) else input
-                return await _ollama_embed(texts)
-        _graphiti.embedder = _OllamaEmbedder()
         await _graphiti.build_indices_and_constraints()
     return _graphiti
 
