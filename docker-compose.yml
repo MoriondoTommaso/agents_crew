@@ -65,12 +65,15 @@ services:
     volumes:
       - neo4j-data:/data
       - neo4j-logs:/logs
+    # Neo4j 5.x: healthcheck via HTTP API (porta 7474) — non usa cypher-shell
+    # che può non essere nel PATH o fallire prima che il DB sia pronto.
+    # start_period alto perché al primo avvio scarica il plugin APOC.
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-changeme}", "RETURN 1"]
-      interval: 30s
+      test: ["CMD", "wget", "-qO", "-", "http://localhost:7474"]
+      interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 40s
+      retries: 10
+      start_period: 60s
 
   # ── 3. Graphiti Memory MCP service ────────────────────────────────────────
   memory:

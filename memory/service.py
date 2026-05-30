@@ -9,21 +9,25 @@ Exposes 5 MCP tools for the coding agent:
 
 Embeddings: local via Ollama (nomic-embed-text) — no OpenAI key required.
 LLM for entity extraction: Ollama (qwen2.5:1.5b) — zero API cost.
+
+Note on graphiti-core 0.3.x imports:
+  LLMClient  → graphiti_core.llm_client.client
+  LLMConfig  → graphiti_core.llm_client.config
+  EmbedderClient → graphiti_core.embedder.client
 """
 
 import os
-import json
 import asyncio
 from datetime import datetime, timezone
-from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
-from graphiti_core.llm_client import LLMClient, LLMConfig
-from graphiti_core.embedder import EmbedderClient
+from graphiti_core.llm_client.client import LLMClient
+from graphiti_core.llm_client.config import LLMConfig
+from graphiti_core.embedder.client import EmbedderClient
 
 # ── Config ─────────────────────────────────────────────────────────────────
 NEO4J_URI      = os.getenv("NEO4J_URI",       "bolt://neo4j:7687")
@@ -66,7 +70,12 @@ class OllamaLLMClient(LLMClient):
         config = LLMConfig(model=model)
         super().__init__(config)
 
-    async def _generate_response(self, messages: list[dict], **kwargs) -> str:
+    async def _generate_response(
+        self,
+        messages: list[dict],
+        response_model=None,
+        **kwargs,
+    ) -> str:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{self.base_url}/api/chat",
@@ -89,8 +98,8 @@ _graphiti: Graphiti | None = None
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        embedder = OllamaEmbedder(base_url=OLLAMA_BASE, model=EMBED_MODEL)
-        llm      = OllamaLLMClient(base_url=OLLAMA_BASE, model=LLM_MODEL)
+        embedder  = OllamaEmbedder(base_url=OLLAMA_BASE, model=EMBED_MODEL)
+        llm       = OllamaLLMClient(base_url=OLLAMA_BASE, model=LLM_MODEL)
         _graphiti = Graphiti(
             neo4j_uri=NEO4J_URI,
             neo4j_user=NEO4J_USER,
@@ -139,11 +148,11 @@ async def health():
 async def list_tools():
     return {
         "tools": [
-            {"name": "memory_recall",      "description": "Semantic search over the knowledge graph.",           "parameters": {"query": "string", "limit": "int (default 10)"}},
-            {"name": "memory_add_episode", "description": "Ingest a new episode into the graph.",                "parameters": {"name": "string", "content": "string", "source": "string"}},
-            {"name": "memory_get_context", "description": "Retrieve all graph facts for a specific entity.",     "parameters": {"entity": "string"}},
-            {"name": "memory_task_log",    "description": "Log a completed or failed task.",                     "parameters": {"task": "string", "status": "string", "files_modified": "list", "decisions": "list", "notes": "string"}},
-            {"name": "memory_snapshot",   "description": "Export the full knowledge graph (debug).",            "parameters": {}},
+            {"name": "memory_recall",      "description": "Semantic search over the knowledge graph.",        "parameters": {"query": "string", "limit": "int (default 10)"}},
+            {"name": "memory_add_episode", "description": "Ingest a new episode into the graph.",             "parameters": {"name": "string", "content": "string", "source": "string"}},
+            {"name": "memory_get_context", "description": "Retrieve all graph facts for a specific entity.",  "parameters": {"entity": "string"}},
+            {"name": "memory_task_log",    "description": "Log a completed or failed task.",                  "parameters": {"task": "string", "status": "string", "files_modified": "list", "decisions": "list", "notes": "string"}},
+            {"name": "memory_snapshot",    "description": "Export the full knowledge graph (debug).",         "parameters": {}},
         ]
     }
 
