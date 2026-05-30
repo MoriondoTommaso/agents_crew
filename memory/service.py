@@ -1,16 +1,8 @@
 """Graphiti Memory MCP Service — port 8002
 
-graphiti-core 0.3.0 package structure (verified from installed files):
-  graphiti_core/llm_client/client.py       → LLMClient (base)
-  graphiti_core/llm_client/config.py       → LLMConfig
-  graphiti_core/llm_client/openai_client.py → OpenAIClient
-  NO graphiti_core/embedder/ subpackage exists in 0.3.0
-
-Embedder: since graphiti_core has no embedder base class in 0.3.0,
-we pass embedder=None to Graphiti and override _embed() via monkey-patch,
-OR use the OpenAI-compatible Ollama endpoint directly through openai-python.
-
-Actually in 0.3.0 Graphiti.__init__ signature: check graphiti.py directly.
+graphiti-core 0.3.0 verified signatures:
+  Graphiti.__init__(self, uri, user, password, llm_client=None)
+  LLMConfig.__init__(model, base_url, api_key)  # no small_model
 """
 
 import os
@@ -41,7 +33,7 @@ _graphiti: Graphiti | None = None
 
 
 async def _ollama_embed(texts: list[str]) -> list[list[float]]:
-    """Call Ollama /api/embeddings directly — no graphiti_core embedder class needed."""
+    """Call Ollama /api/embeddings directly."""
     async with httpx.AsyncClient(timeout=60) as client:
         results = []
         for text in texts:
@@ -57,8 +49,9 @@ async def _ollama_embed(texts: list[str]) -> list[list[float]]:
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        # LLMConfig in graphiti-core 0.3.0 only accepts: model, api_key, base_url
-        # small_model was added in a later version — do NOT pass it here.
+        # Verified signature for graphiti-core 0.3.0:
+        #   LLMConfig(model, base_url, api_key)
+        #   Graphiti(uri, user, password, llm_client)
         llm = OpenAIClient(
             config=LLMConfig(
                 model=LLM_MODEL,
@@ -67,13 +60,11 @@ async def get_graphiti() -> Graphiti:
             )
         )
         _graphiti = Graphiti(
-            neo4j_uri=NEO4J_URI,
-            neo4j_user=NEO4J_USER,
-            neo4j_password=NEO4J_PASSWORD,
+            uri=NEO4J_URI,
+            user=NEO4J_USER,
+            password=NEO4J_PASSWORD,
             llm_client=llm,
         )
-        # Monkey-patch the embedder: Graphiti 0.3.0 stores embedder on the instance
-        # and calls self.embedder.create(texts). We wrap our async function.
         class _OllamaEmbedder:
             async def create(self, input):
                 texts = [input] if isinstance(input, str) else input
@@ -107,26 +98,19 @@ class TaskLogRequest(BaseModel):
 # ── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "service": "memory-mcp",
-        "embed_model": EMBED_MODEL,
-        "llm_model": LLM_MODEL,
-        "ollama_base": OLLAMA_BASE,
-    }
+    return {"status": "ok", "service": "memory-mcp",
+            "embed_model": EMBED_MODEL, "llm_model": LLM_MODEL, "ollama_base": OLLAMA_BASE}
 
 
 @app.get("/tools")
 async def list_tools():
-    return {
-        "tools": [
-            {"name": "memory_recall",      "description": "Semantic search over the knowledge graph.",        "parameters": {"query": "string", "limit": "int (default 10)"}},
-            {"name": "memory_add_episode", "description": "Ingest a new episode into the graph.",             "parameters": {"name": "string", "content": "string", "source": "string"}},
-            {"name": "memory_get_context", "description": "Retrieve all graph facts for a specific entity.",  "parameters": {"entity": "string"}},
-            {"name": "memory_task_log",    "description": "Log a completed or failed task.",                  "parameters": {"task": "string", "status": "string", "files_modified": "list", "decisions": "list", "notes": "string"}},
-            {"name": "memory_snapshot",    "description": "Export the full knowledge graph (debug).",         "parameters": {}},
-        ]
-    }
+    return {"tools": [
+        {"name": "memory_recall",      "description": "Semantic search over the knowledge graph.",       "parameters": {"query": "string", "limit": "int (default 10)"}},
+        {"name": "memory_add_episode", "description": "Ingest a new episode into the graph.",            "parameters": {"name": "string", "content": "string", "source": "string"}},
+        {"name": "memory_get_context", "description": "Retrieve all graph facts for a specific entity.", "parameters": {"entity": "string"}},
+        {"name": "memory_task_log",    "description": "Log a completed or failed task.",                 "parameters": {"task": "string", "status": "string", "files_modified": "list", "decisions": "list", "notes": "string"}},
+        {"name": "memory_snapshot",    "description": "Export the full knowledge graph (debug).",        "parameters": {}},
+    ]}
 
 
 @app.post("/mcp/memory_recall")
