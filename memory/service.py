@@ -1,18 +1,18 @@
 """Graphiti Memory MCP Service — port 8002"""
 
 import asyncio
+import logging
 import os
 import traceback
-import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from openai import AsyncOpenAI
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 from graphiti_core import Graphiti
-from graphiti_core.nodes import EpisodeType
-from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.llm_client.config import LLMConfig
+from graphiti_core.llm_client.openai_client import OpenAIClient
+from graphiti_core.nodes import EpisodeType
+from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("memory")
@@ -171,11 +171,11 @@ async def memory_add_episode(req: EpisodeRequest):
             episode_body=req.content,
             source=EpisodeType.text,
             source_description=req.source,
-            reference_time=datetime.now(timezone.utc),
+            reference_time=datetime.now(UTC),
             group_id=GROUP_ID,
         )
         return {"status": "ok", "episode": req.name}
-    except Exception as e:
+    except Exception:
         logger.error("memory_add_episode error:\n%s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=traceback.format_exc())
 
@@ -214,7 +214,7 @@ async def memory_task_log(req: TaskLogRequest):
             episode_body=content,
             source=EpisodeType.text,
             source_description="agent_task_log",
-            reference_time=datetime.now(timezone.utc),
+            reference_time=datetime.now(UTC),
             group_id=GROUP_ID,
         )
         return {"status": "logged", "task": req.task, "task_status": req.status}

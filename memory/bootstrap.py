@@ -12,9 +12,8 @@ What it does:
 """
 
 import ast
-import os
 import asyncio
-from datetime import datetime, timezone
+import os
 from pathlib import Path
 
 import httpx
