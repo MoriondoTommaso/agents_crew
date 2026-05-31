@@ -20,12 +20,14 @@ jobs:
           cache: pip
 
       - name: Install dev dependencies
-        run: pip install -e ".[dev]" httpx
+        run: pip install fastapi uvicorn pydantic httpx pytest pytest-asyncio openai python-dotenv
 
       - name: Ruff lint
-        run: ruff check memory/ tests/test_memory_service.py
+        run: |
+          pip install ruff
+          ruff check memory/ tests/test_memory_service.py
 
-      - name: Pytest — memory service (mocked)
+      - name: Pytest — memory service (fully mocked, no external deps)
         run: pytest tests/test_memory_service.py -v --tb=short
 
   docker-build:
