@@ -1,44 +1,46 @@
 # agents_crew
 
-Infrastruttura per sviluppo agentico con **Claude Code** come motore,
-**LiteLLM** per routing ibrido frontier/locale, e **Graphiti** per memoria
-persistente cross-sessione.
+[![CI](https://github.com/MoriondoTommaso/agents_crew/actions/workflows/ci.yml/badge.svg)](https://github.com/MoriondoTommaso/agents_crew/actions/workflows/ci.yml)
 
-Zero costi API per embedding e code generation — tutto locale via Ollama.
+Infrastruttura per sviluppo agentico con **OpenCode** come harness,
+**FreeLLMAPI** per routing ibrido frontier/locale, e **Graphiti** per
+memoria persistente cross-sessione.
+
+Zero costi API per embedding — tutto locale via Ollama.
 
 ## Architettura
 
 ```
-Claude Code CLI (Mac)
-    │  ANTHROPIC_BASE_URL=http://localhost:4000
+OpenCode CLI (host Mac/Linux)
+    │  OPENAI_BASE_URL=http://localhost:3001/v1
     ▼
-LiteLLM proxy :4000
-    ├── claude-opus-4-5 / claude-sonnet-4-5  →  FreeLLM (planning, review)
-    └── claude-haiku-4-5                     →  Ollama qwen2.5-coder:14b (codice)
+FreeLLMAPI :3001  (o qualsiasi endpoint OpenAI-compatible)
+    ├── planning / architettura / review  →  cloud (Gemini, GPT-4o, Claude…)
+    └── code generation                  →  Ollama locale (opzionale)
 
-MCP: Memory service :8002
+MCP: Memory service :8002  (Docker)
     └── Graphiti + Neo4j
             ├── embedding:          Ollama nomic-embed-text  (locale, gratuito)
-            └── entity extraction:  Ollama qwen2.5:1.5b      (locale, gratuito)
+            └── entity extraction:  FreeLLMAPI / Ollama      (configurabile)
 ```
 
 ## Struttura repo
 
 ```
 agents_crew/
-├── CLAUDE.md                  ← istruzioni comportamento per Claude Code
+├── AGENTS.md                  ← istruzioni comportamento per OpenCode
 ├── MEMORY.md                  ← seed knowledge graph (bootstrap)
-├── Makefile
-├── .env.example
-├── .claude/
-│   └── settings.json          ← MCP config (memory server)
-├── litellm/
-│   └── config.yaml            ← routing FreeLLM / Ollama
+├── Makefile                   ← comandi up / bootstrap / opencode / models
+├── .env.example               ← template variabili d'ambiente
+├── .opencode/
+│   └── config.json            ← MCP config per OpenCode
 ├── memory/
 │   ├── Dockerfile
-│   ├── service.py             ← Graphiti MCP, 5 tool, embedding locale
-│   └── bootstrap.py           ← scansione AST codebase → graph
-└── docker-compose.yml         ← 3 container: litellm, neo4j, memory
+│   ├── service.py             ← Graphiti MCP, 5 tool, porta 8002
+│   └── bootstrap.py           ← scansione codebase → knowledge graph
+├── docker-compose.yml         ← 2 container: neo4j, memory
+└── tests/
+    └── test_memory_service.py ← 13 test, zero dipendenze esterne
 ```
 
 ## Quick Start
@@ -47,17 +49,11 @@ agents_crew/
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - [Ollama](https://ollama.com/) in esecuzione sull'host
-- [Claude Code CLI](https://code.claude.com/docs/en/quickstart)
-- FreeLLM o qualsiasi endpoint OpenAI-compatible per i task di planning
+- [OpenCode CLI](https://opencode.ai) — `npm i -g opencode-ai`
+- FreeLLMAPI o qualsiasi endpoint OpenAI-compatible
 - GitHub personal access token con scope `repo`
 
-### 1. Installa Claude Code
-
-```bash
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-### 2. Configura
+### 1. Clona e configura
 
 ```bash
 git clone https://github.com/MoriondoTommaso/agents_crew
@@ -65,26 +61,30 @@ cd agents_crew
 cp .env.example .env
 ```
 
-Modifica `.env`:
+Modifica `.env` con il tuo endpoint e credenziali:
 
 ```bash
-FREELLM_BASE_URL=http://localhost:3001/v1
-FREELLMAPI_KEY=none
-GITHUB_TOKEN=ghp_...
+# LLM endpoint (FreeLLMAPI, OpenRouter, Groq, Ollama puro...)
+OPENAI_BASE_URL=http://localhost:3001/v1
+OPENAI_API_KEY=la-tua-chiave
+
+# Memory service
 NEO4J_PASSWORD=cambia-questa
-LITELLM_MASTER_KEY=sk-local
+GRAPHITI_LLM_MODEL=auto
+
+# GitHub
+GITHUB_TOKEN=ghp_...
 ```
 
-### 3. Pull modelli Ollama
+### 2. Pull modelli Ollama
 
 ```bash
 make models
 # → nomic-embed-text   274MB   embedding memoria
-# → qwen2.5:1.5b       ~1GB    entity extraction memoria
-# → qwen2.5-coder:14b  ~9GB    code generation
+# → qwen2.5:1.5b       ~1GB    entity extraction memoria (opzionale)
 ```
 
-### 4. Avvia lo stack
+### 3. Avvia lo stack
 
 ```bash
 make up
@@ -92,43 +92,39 @@ make up
 
 | Container | Porta | Ruolo |
 |---|---|---|
-| `litellm` | 4000 | Proxy Anthropic→OpenAI, routing FreeLLM/Ollama |
 | `neo4j` | 7474 / 7687 | Graph database |
 | `memory` | 8002 | Graphiti MCP service |
 
-### 5. Seed knowledge graph (solo prima volta)
+### 4. Seed knowledge graph (solo prima volta)
 
 ```bash
 make bootstrap
-# → scansiona tutti i .py del repo
-# → ingesta struttura nel knowledge graph
+# scansiona .py del repo e ingesta struttura nel knowledge graph
 ```
 
-### 6. Lancia Claude Code
+### 5. Lancia OpenCode
 
 ```bash
-make claude
+make opencode
+# oppure direttamente:
+opencode
 ```
 
-Claude Code si apre nel terminale, legge `CLAUDE.md` automaticamente,
-carica il MCP memory da `.claude/settings.json`, e punta a LiteLLM
-come backend LLM.
+OpenCode legge `AGENTS.md` automaticamente, carica il MCP memory
+da `.opencode/config.json`, e usa FreeLLMAPI come backend LLM.
 
 ## Workflow agentico
 
-Ogni sessione segue questo loop automatico:
+Ogni sessione segue questo loop:
 
 ```
 1. RECALL     cerca contesto rilevante in Graphiti
 2. PLAN       pianifica la minima diff necessaria
-3. BRANCH     git checkout -b feat/<slug>
-4. IMPLEMENT  write → bash (esegui) → leggi output → correggi → ripeti
+3. BRANCH     git checkout -b feat/<slug>  (mai su main)
+4. IMPLEMENT  write → bash → leggi output → correggi → ripeti
 5. PR         gh pr create
 6. LOG        memory_task_log → salva nel knowledge graph
 ```
-
-L'agentic loop (scrive → esegue → vede errore → corregge) è nativo
-in Claude Code — non serve orchestrazione esterna.
 
 ## Memory MCP — tool disponibili
 
@@ -143,75 +139,85 @@ Endpoint base: `http://localhost:8002`
 | `memory_snapshot` | `GET /mcp/memory_snapshot` | Export graph (debug) |
 
 ```bash
-# Verifica health con modelli attivi
+# Health check
 curl http://localhost:8002/health
 
-# Ricerca manuale nel graph
+# Ricerca manuale
 curl -s -X POST http://localhost:8002/mcp/memory_recall \
   -H 'Content-Type: application/json' \
-  -d '{"query": "LiteLLM routing config", "limit": 5}'
+  -d '{"query": "routing config", "limit": 5}'
 ```
 
-## LiteLLM routing
+## Cambio endpoint LLM (zero sbatti)
 
-Claude Code usa nomi modello Anthropic — LiteLLM li mappa ai backend reali:
+Basta cambiare due righe in `.env` — nessun riavvio di container:
 
-| Modello Claude Code | Backend | Uso consigliato |
-|---|---|---|
-| `claude-opus-4-5` | FreeLLM → gpt-4o | Planning, architettura, review |
-| `claude-sonnet-4-5` | FreeLLM → gpt-4o | Task medi |
-| `claude-haiku-4-5` | Ollama → qwen2.5-coder:14b | Code generation, task rapidi |
+```bash
+# FreeLLMAPI (default)
+OPENAI_BASE_URL=http://localhost:3001/v1
+OPENAI_API_KEY=freellmapi-...
 
-Per cambiare modello al volo dentro Claude Code: `/model`
+# OpenRouter
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=sk-or-...
+
+# Groq
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+OPENAI_API_KEY=gsk_...
+
+# Ollama locale puro
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_API_KEY=ollama
+```
 
 ## Variabili d'ambiente
 
 | Variabile | Default | Descrizione |
 |---|---|---|
-| `FREELLM_BASE_URL` | `http://localhost:3001/v1` | Endpoint FreeLLM |
-| `FREELLMAPI_KEY` | `none` | API key FreeLLM |
+| `OPENAI_BASE_URL` | `http://localhost:3001/v1` | Endpoint LLM (OpenAI-compatible) |
+| `OPENAI_API_KEY` | — | API key provider |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint Ollama |
-| `LITELLM_MASTER_KEY` | `sk-local` | Chiave proxy LiteLLM (= ANTHROPIC_API_KEY per Claude Code) |
-| `NEO4J_PASSWORD` | `changeme` | Password Neo4j |
+| `NEO4J_PASSWORD` | `changeme` | ⚠️ Cambiare prima di usare |
 | `GITHUB_TOKEN` | — | GitHub PAT scope `repo` |
+| `GRAPHITI_LLM_MODEL` | `auto` | Modello per entity extraction |
 | `GRAPHITI_EMBED_MODEL` | `nomic-embed-text` | Modello embedding locale |
-| `GRAPHITI_LLM_MODEL` | `qwen2.5:1.5b` | Modello entity extraction locale |
+| `GRAPHITI_GROUP_ID` | `agents` | Namespace memoria (un valore per progetto) |
 
 ## Comandi Makefile
 
 ```bash
-make up          # avvia stack Docker
+make up          # avvia stack Docker (neo4j + memory)
 make down        # ferma stack
-make bootstrap   # pull modelli + seed knowledge graph (prima volta)
-make models      # pull tutti i modelli Ollama
-make claude      # lancia Claude Code puntato a LiteLLM
+make bootstrap   # seed knowledge graph dal codebase (prima volta)
+make models      # pull modelli Ollama
+make opencode    # lancia OpenCode
 make logs        # segui tutti i log
 make clean       # ferma + distrugge volumi (reset completo)
 ```
 
-## Comandi utili dentro Claude Code
-
-| Comando | Azione |
-|---|---|
-| `Shift+Tab` | Plan mode — pianifica senza eseguire |
-| `/model` | Cambia modello al volo |
-| `/resume` | Riprende sessione precedente |
-| `/exit` | Esce |
+## Sviluppo e test
 
 ```bash
-# Riprende l'ultima sessione
-make claude -- --continue
+# Installa dipendenze dev
+pip install -e ".[dev]" httpx
+
+# Esegui test (zero dipendenze esterne, tutto mockato)
+pytest tests/test_memory_service.py -v
+
+# Lint
+ruff check memory/ tests/test_memory_service.py
 ```
+
+La CI gira automaticamente su ogni push e PR — vedi badge sopra.
 
 ## Debug
 
 ```bash
-# Log di tutti i container
+# Log container
 make logs
 
-# Health check singoli servizi
-curl http://localhost:4000/health   # LiteLLM
-curl http://localhost:8002/health   # Memory
+# Health singoli servizi
+curl http://localhost:8002/health
 
 # Neo4j Browser (graph visuale)
 open http://localhost:7474
@@ -223,31 +229,11 @@ make clean && make up && make bootstrap
 
 ## Lavorare su repo diverse
 
-Claude Code vede solo la cartella in cui viene lanciato.
-Lo stack Docker (LiteLLM + memory) è condiviso tra tutti i progetti.
+Lo stack Docker (neo4j + memory) è condiviso. OpenCode vede solo la cartella
+in cui viene lanciato. Per isolare la memoria per progetto:
 
 ```bash
-# Progetto diverso
-cd ~/progetti/altro-repo
-ANTHROPIC_BASE_URL=http://localhost:4000 \
-ANTHROPIC_API_KEY=sk-local \
-claude
+# In .env del progetto B
+GRAPHITI_GROUP_ID=progetto-b
+# poi riavvia: make down && make up
 ```
-
-La memoria Graphiti è condivisa tra sessioni e repo.
-Per isolare la memoria per progetto, modifica `memory/service.py`
-aggiungendo un `group_id` distinto per repo.
-
-## Skills
-
-File Markdown in `skills/` con workflow e context specializzati.
-Caricali esplicitamente nel prompt:
-
-```
-> Leggi ./skills/coding-agent.md e segui il workflow per aggiungere...
-```
-
-| Skill | Descrizione |
-|---|---|
-| `coding-agent.md` | Workflow completo: recall → branch → implement → PR → log |
-| `memory-agent.md` | Come usare i tool Graphiti, esempi curl, reset |

@@ -1,7 +1,4 @@
-# ARCHIVED — no longer used.
-# LiteLLM has been removed from the stack.
-# LLM routing is now handled by FreeLLMAPI (https://github.com/tashfeenahmed/freellmapi)
-# running on the host at http://localhost:3001/v1
-#
-# The harness (OpenCode) speaks OpenAI format directly to FreeLLMAPI.
-# Configure endpoint via OPENAI_BASE_URL + OPENAI_API_KEY in .env
+# ARCHIVED — LiteLLM rimosso dallo stack.
+# Routing LLM ora gestito da FreeLLMAPI (host) + OPENAI_BASE_URL in .env
+# Questo file viene mantenuto solo per cronologia git.
+# Non viene referenziato da nessun container o processo.
