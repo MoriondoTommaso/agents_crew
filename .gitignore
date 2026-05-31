@@ -21,3 +21,4 @@ Thumbs.db
 .opencode/
 roadmap.md
 
+.ruff_cache/
