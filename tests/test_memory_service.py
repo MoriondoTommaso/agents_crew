@@ -10,9 +10,10 @@ Run with:
 or:
     pytest tests/test_memory_service.py -v
 """
-import sys
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+import sys
+from unittest.mock import AsyncMock, MagicMock
+
 
 # ---------------------------------------------------------------------------
 # Stub out all heavy deps BEFORE importing service
@@ -20,19 +21,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 def _stub_graphiti_modules():
     """Inject lightweight stubs so service.py can be imported without
-    installing graphiti_core, neo4j, openai, or python-dotenv."""
-
-    # dotenv (transitive dep of graphiti_core)
+    installing graphiti_core, neo4j, openai, or python-dotenv.
+    """
     dotenv_mod = MagicMock()
     dotenv_mod.load_dotenv = lambda *a, **kw: None
     sys.modules.setdefault("dotenv", dotenv_mod)
 
-    # openai
     openai_mod = MagicMock()
     openai_mod.AsyncOpenAI = MagicMock
     sys.modules.setdefault("openai", openai_mod)
 
-    # graphiti_core and every sub-module service.py touches
     for mod in [
         "graphiti_core",
         "graphiti_core.graphiti",
@@ -41,10 +39,8 @@ def _stub_graphiti_modules():
         "graphiti_core.llm_client.openai_client",
         "graphiti_core.llm_client.config",
     ]:
-        stub = MagicMock()
-        sys.modules.setdefault(mod, stub)
+        sys.modules.setdefault(mod, MagicMock())
 
-    # Expose the specific names service.py imports
     sys.modules["graphiti_core"].Graphiti = MagicMock
     sys.modules["graphiti_core.nodes"].EpisodeType = MagicMock()
     sys.modules["graphiti_core.nodes"].EpisodeType.text = "text"
@@ -56,7 +52,9 @@ _stub_graphiti_modules()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "memory"))
 
-import service as svc  # noqa: E402  (must come after stubs)
+import pytest  # noqa: E402
+import service as svc  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +70,6 @@ def _make_fact(uuid="abc123", fact="service.py imports fastapi", valid_at=None):
 
 
 def _mock_graphiti():
-    """Return a fresh mock Graphiti instance."""
     mock_g = MagicMock()
     mock_g.search = AsyncMock(return_value=[_make_fact()])
     mock_g.add_episode = AsyncMock(return_value=None)
@@ -87,9 +84,9 @@ def _mock_graphiti():
     return mock_g
 
 
-from fastapi.testclient import TestClient  # noqa: E402
-import pytest  # noqa: E402
-
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def reset_graphiti_singleton():
@@ -161,8 +158,7 @@ class TestMemoryRecall:
         client.post("/mcp/memory_recall", json={"query": "test", "limit": 5})
         mock_g = reset_graphiti_singleton
         mock_g.search.assert_called_once()
-        call_kwargs = mock_g.search.call_args
-        assert "group_ids" in call_kwargs.kwargs
+        assert "group_ids" in mock_g.search.call_args.kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +183,7 @@ class TestAddEpisode:
         })
         mock_g = reset_graphiti_singleton
         mock_g.add_episode.assert_called_once()
-        kwargs = mock_g.add_episode.call_args.kwargs
-        assert kwargs["group_id"] == svc.GROUP_ID
+        assert mock_g.add_episode.call_args.kwargs["group_id"] == svc.GROUP_ID
 
     def test_add_episode_missing_fields_returns_422(self, client):
         r = client.post("/mcp/memory_add_episode", json={"name": "only-name"})

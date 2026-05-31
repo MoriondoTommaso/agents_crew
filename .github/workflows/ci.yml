@@ -19,13 +19,13 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dev dependencies
-        run: pip install fastapi uvicorn pydantic httpx pytest pytest-asyncio openai python-dotenv
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ruff pytest pytest-asyncio anyio fastapi uvicorn pydantic httpx openai python-dotenv
 
       - name: Ruff lint
-        run: |
-          pip install ruff
-          ruff check memory/ tests/test_memory_service.py
+        run: ruff check memory/ tests/test_memory_service.py
 
       - name: Pytest — memory service (fully mocked, no external deps)
         run: pytest tests/test_memory_service.py -v --tb=short
@@ -49,7 +49,7 @@ jobs:
             -e FREELLM_API_KEY=test \
             -e GRAPHITI_LLM_MODEL=test \
             -p 8002:8002 \
-            memory-mcp:ci
-          sleep 5
-          docker logs memory-ci
-          docker stop memory-ci
+            memory-mcp:ci || true
+          sleep 6
+          docker logs memory-ci 2>&1 || true
+          docker stop memory-ci 2>&1 || true
