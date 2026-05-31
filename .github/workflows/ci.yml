@@ -25,7 +25,7 @@ jobs:
           pip install ruff pytest pytest-asyncio anyio fastapi uvicorn pydantic httpx openai python-dotenv
 
       - name: Ruff lint
-        run: ruff check memory/ tests/test_memory_service.py
+        run: ruff check --exclude tessta/
 
       - name: Pytest — memory service (fully mocked, no external deps)
         run: pytest tests/test_memory_service.py -v --tb=short
