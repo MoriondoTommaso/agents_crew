@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint + Test (memory service)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]" httpx
+
+      - name: Ruff lint
+        run: ruff check memory/ tests/test_memory_service.py
+
+      - name: Pytest — memory service (mocked)
+        run: pytest tests/test_memory_service.py -v --tb=short
+
+  docker-build:
+    name: Docker build (memory image)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build memory Docker image
+        run: docker build -t memory-mcp:ci ./memory
+
+      - name: Smoke-test container starts
+        run: |
+          docker run -d --name memory-ci \
+            -e NEO4J_URI=bolt://localhost:7687 \
+            -e FREELLM_BASE_URL=http://localhost:3001/v1 \
+            -e FREELLM_API_KEY=test \
+            -e GRAPHITI_LLM_MODEL=test \
+            -p 8002:8002 \
+            memory-mcp:ci
+          sleep 5
+          docker logs memory-ci
+          docker stop memory-ci

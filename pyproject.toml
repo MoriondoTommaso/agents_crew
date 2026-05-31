@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-crew"
-version = "2.0.0"
-description = "Agentic coding infrastructure: Claude Code + LiteLLM + Graphiti memory"
+version = "2.3.0"
+description = "Agentic coding infrastructure: OpenCode + Graphiti memory + FreeLLMAPI hybrid routing"
 requires-python = ">=3.11"
 
-# Core dependencies — mirror delle versioni pinnate in memory/Dockerfile
-# Installale per sviluppo locale del memory service (type checking, IDE support)
+# Core dependencies — mirror of versions pinned in memory/Dockerfile
+# Install for local development of the memory service (type checking, IDE support)
 dependencies = [
     "fastapi==0.115.0",
     "uvicorn==0.30.6",
@@ -17,6 +17,7 @@ dependencies = [
     "neo4j==5.26.0",
     "httpx==0.27.0",
     "pydantic>=2.0",
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -25,10 +26,9 @@ dev = [
     "pyright>=1.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "httpx>=0.27.0",
 ]
 
-# Hatchling non trova un package Python standard (questa è infrastruttura, non una lib).
-# Gli diciamo esplicitamente di includere la directory memory/ come package.
 [tool.hatch.build.targets.wheel]
 packages = ["memory"]
 
@@ -43,7 +43,10 @@ ignore = ["E501"]
 [tool.pyright]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+exclude = ["tests/test_router.py", "tests/test_server.py"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Skip legacy placeholder files
+collect_ignore = ["tests/test_router.py", "tests/test_server.py"]
