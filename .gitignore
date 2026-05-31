@@ -1,31 +1,19 @@
-# --- Python & Environment ---
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
 .env
-
-# --- Build & Distribution ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
 dist/
 build/
-*.egg-info/
-*.egg
-nosetests.xml
-coverage.xml
-*.cover
-.history/
-
-
-.uv/
-.python-version
-
-*.log
-
-.crewai/
-
+.venv/
+venv/
 .DS_Store
 .DS_Store?
 ._*
 Thumbs.db
 
 .opencode/
+*.log

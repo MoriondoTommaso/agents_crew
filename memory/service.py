@@ -1,132 +1,164 @@
-"""Graphiti Memory MCP Service — port 8002
+"""Graphiti Memory MCP Service — port 8002"""
 
-Exposes 5 MCP tools for the coding agent:
-  - memory_recall        : semantic search over the knowledge graph
-  - memory_add_episode   : ingest a new episode (task, decision, observation)
-  - memory_get_context   : retrieve subgraph for a specific entity/file
-  - memory_task_log      : log a completed or failed task with affected files
-  - memory_snapshot      : dump full graph as JSON (debug / export)
-"""
-
-import os
-import json
 import asyncio
+import os
+import traceback
+import logging
 from datetime import datetime, timezone
-from typing import Any
 
+from openai import AsyncOpenAI
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
+from graphiti_core.llm_client.openai_client import OpenAIClient
+from graphiti_core.llm_client.config import LLMConfig
 
-# ── Config ─────────────────────────────────────────────────────────────────
-NEO4J_URI      = os.getenv("NEO4J_URI",      "bolt://neo4j:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER",     "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "changeme")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL", "text-embedding-3-small")
-LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "gpt-4o-mini")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("memory")
 
-# ── App + Graphiti client ──────────────────────────────────────────────────
-app = FastAPI(title="Memory MCP Service", version="1.0.0")
+# ── Config ──────────────────────────────────────────────────────────────────
+NEO4J_URI      = os.getenv("NEO4J_URI",            "bolt://neo4j:7687")
+NEO4J_USER     = os.getenv("NEO4J_USER",           "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD",       "changeme")
+
+FREELLM_BASE   = os.getenv("FREELLM_BASE_URL",     "http://host.docker.internal:3001/v1")
+FREELLM_KEY    = os.getenv("FREELLM_API_KEY",      os.getenv("OPENAI_API_KEY", "freellm"))
+LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "auto")
+
+OLLAMA_BASE    = os.getenv("OLLAMA_BASE_URL",       "http://host.docker.internal:11434")
+EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL",  "nomic-embed-text")
+EMBED_DIM      = int(os.getenv("GRAPHITI_EMBED_DIM", "768"))
+OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
+
+GROUP_ID       = os.getenv("GRAPHITI_GROUP_ID", "agents")
+
+
+# ── Embedder proxy ────────────────────────────────────────────────────────────
+class _EmbedderProxy:
+    def __init__(self, model: str, base_url: str):
+        self._model = model
+        self._client = AsyncOpenAI(api_key="ollama", base_url=base_url)
+
+    async def create(self, **kwargs):
+        kwargs["model"] = self._model
+        return await self._client.embeddings.create(**kwargs)
+
+
+class _PatchedOpenAIClient(OpenAIClient):
+    """OpenAIClient with embedder redirected to Ollama."""
+    def get_embedder(self):
+        return _EmbedderProxy(EMBED_MODEL, OLLAMA_OPENAI_BASE)
+
+
+# ── Index creation ─────────────────────────────────────────────────────────────
+async def _build_indices(driver, dim: int):
+    queries = [
+        f"CREATE VECTOR INDEX fact_embedding IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding) OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, `vector.similarity_function`: 'cosine'}}}}",
+        f"CREATE VECTOR INDEX name_embedding IF NOT EXISTS FOR (n:Entity) ON (n.name_embedding) OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, `vector.similarity_function`: 'cosine'}}}}",
+        f"CREATE VECTOR INDEX community_name_embedding IF NOT EXISTS FOR (n:Community) ON (n.name_embedding) OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, `vector.similarity_function`: 'cosine'}}}}",
+        "CREATE FULLTEXT INDEX name_and_summary IF NOT EXISTS FOR (n:Entity) ON EACH [n.name, n.summary]",
+        "CREATE FULLTEXT INDEX episode_content IF NOT EXISTS FOR (n:Episodic) ON EACH [n.content]",
+        "CREATE FULLTEXT INDEX name_and_fact IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON EACH [r.name, r.fact]",
+        "CREATE CONSTRAINT entity_uuid IF NOT EXISTS FOR (n:Entity) REQUIRE n.uuid IS UNIQUE",
+        "CREATE CONSTRAINT episodic_uuid IF NOT EXISTS FOR (n:Episodic) REQUIRE n.uuid IS UNIQUE",
+        "CREATE CONSTRAINT community_uuid IF NOT EXISTS FOR (n:Community) REQUIRE n.uuid IS UNIQUE",
+        "CREATE CONSTRAINT relation_uuid IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.uuid IS UNIQUE",
+        "CREATE INDEX entity_group_id IF NOT EXISTS FOR (n:Entity) ON (n.group_id)",
+        "CREATE INDEX episodic_group_id IF NOT EXISTS FOR (n:Episodic) ON (n.group_id)",
+        "CREATE INDEX community_group_id IF NOT EXISTS FOR (n:Community) ON (n.group_id)",
+        "CREATE INDEX relation_group_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.group_id)",
+        "CREATE INDEX episodic_created_at IF NOT EXISTS FOR (n:Episodic) ON (n.created_at)",
+        "CREATE INDEX relation_created_at IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.created_at)",
+        "CREATE INDEX relation_expired_at IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.expired_at)",
+    ]
+    for q in queries:
+        await driver.execute_query(q.strip())
+
+
+# ── App + Graphiti singleton (async-safe) ─────────────────────────────────────
+app = FastAPI(title="Memory MCP Service", version="2.3.0")
 _graphiti: Graphiti | None = None
+_graphiti_lock = asyncio.Lock()
 
 
 async def get_graphiti() -> Graphiti:
     global _graphiti
     if _graphiti is None:
-        _graphiti = Graphiti(
-            neo4j_uri=NEO4J_URI,
-            neo4j_user=NEO4J_USER,
-            neo4j_password=NEO4J_PASSWORD,
-        )
-        await _graphiti.build_indices_and_constraints()
+        async with _graphiti_lock:
+            if _graphiti is None:  # double-checked locking
+                logger.info("Initializing Graphiti: LLM=%s @ %s group_id=%s", LLM_MODEL, FREELLM_BASE, GROUP_ID)
+                llm = _PatchedOpenAIClient(
+                    config=LLMConfig(
+                        model=LLM_MODEL,
+                        base_url=FREELLM_BASE,
+                        api_key=FREELLM_KEY,
+                    )
+                )
+                g = Graphiti(
+                    uri=NEO4J_URI,
+                    user=NEO4J_USER,
+                    password=NEO4J_PASSWORD,
+                    llm_client=llm,
+                )
+                await _build_indices(g.driver, EMBED_DIM)
+                _graphiti = g
     return _graphiti
 
 
-# ── Pydantic models ────────────────────────────────────────────────────────
+# ── Pydantic models ──────────────────────────────────────────────────────────
 class RecallRequest(BaseModel):
     query: str
     limit: int = 10
 
 class EpisodeRequest(BaseModel):
-    name: str          # short label, e.g. "fix keyword routing"
-    content: str       # free-text description of what happened
-    source: str = "agent"  # agent | human | system
+    name: str
+    content: str
+    source: str = "agent"
 
 class ContextRequest(BaseModel):
-    entity: str        # file path or entity name, e.g. "crew.py" or "SMLRouter"
+    entity: str
 
 class TaskLogRequest(BaseModel):
     task: str
-    status: str        # "completed" | "failed" | "in_progress"
+    status: str
     files_modified: list[str] = []
     decisions: list[str] = []
     notes: str = ""
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────
+# ── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "memory-mcp"}
+    return {"status": "ok", "service": "memory-mcp", "version": "2.3.0",
+            "llm": f"{FREELLM_BASE} / {LLM_MODEL}",
+            "embedder": f"{OLLAMA_BASE} / {EMBED_MODEL} ({EMBED_DIM}d)",
+            "group_id": GROUP_ID}
 
 
 @app.get("/tools")
 async def list_tools():
-    """MCP tool manifest."""
-    return {
-        "tools": [
-            {
-                "name": "memory_recall",
-                "description": "Semantic search over the knowledge graph. Returns relevant facts, decisions, and context from past tasks.",
-                "parameters": {"query": "string", "limit": "int (default 10)"}
-            },
-            {
-                "name": "memory_add_episode",
-                "description": "Ingest a new episode into the graph (observation, decision, task result). Call after every significant action.",
-                "parameters": {"name": "string", "content": "string", "source": "string (agent|human|system)"}
-            },
-            {
-                "name": "memory_get_context",
-                "description": "Retrieve all graph facts related to a specific entity (file, class, function, concept).",
-                "parameters": {"entity": "string"}
-            },
-            {
-                "name": "memory_task_log",
-                "description": "Log a completed, failed, or in-progress task with affected files and decisions made.",
-                "parameters": {
-                    "task": "string",
-                    "status": "completed|failed|in_progress",
-                    "files_modified": "list[string]",
-                    "decisions": "list[string]",
-                    "notes": "string"
-                }
-            },
-            {
-                "name": "memory_snapshot",
-                "description": "Export the full knowledge graph as JSON. Use for debugging or external inspection.",
-                "parameters": {}
-            }
-        ]
-    }
+    return {"tools": [
+        {"name": "memory_recall",      "description": "Semantic search over the knowledge graph.",       "parameters": {"query": "string", "limit": "int (default 10)"}},
+        {"name": "memory_add_episode", "description": "Ingest a new episode into the graph.",            "parameters": {"name": "string", "content": "string", "source": "string"}},
+        {"name": "memory_get_context", "description": "Retrieve all graph facts for a specific entity.", "parameters": {"entity": "string"}},
+        {"name": "memory_task_log",    "description": "Log a completed or failed task.",                 "parameters": {"task": "string", "status": "string", "files_modified": "list", "decisions": "list", "notes": "string"}},
+        {"name": "memory_snapshot",    "description": "Export raw facts from the knowledge graph (debug).", "parameters": {}},
+    ]}
 
 
 @app.post("/mcp/memory_recall")
 async def memory_recall(req: RecallRequest):
     g = await get_graphiti()
     try:
-        results = await g.search(req.query, num_results=req.limit)
+        results = await g.search(req.query, num_results=req.limit, group_ids=[GROUP_ID])
         facts = [
-            {
-                "uuid": str(r.uuid),
-                "fact": r.fact,
-                "valid_at": r.valid_at.isoformat() if r.valid_at else None,
-                "source_node": r.source_node_uuid,
-            }
+            {"uuid": str(r.uuid), "fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None}
             for r in results
         ]
         return {"query": req.query, "results": facts, "count": len(facts)}
     except Exception as e:
+        logger.error("memory_recall error: %s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -140,10 +172,12 @@ async def memory_add_episode(req: EpisodeRequest):
             source=EpisodeType.text,
             source_description=req.source,
             reference_time=datetime.now(timezone.utc),
+            group_id=GROUP_ID,
         )
         return {"status": "ok", "episode": req.name}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("memory_add_episode error:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=traceback.format_exc())
 
 
 @app.post("/mcp/memory_get_context")
@@ -153,27 +187,27 @@ async def memory_get_context(req: ContextRequest):
         results = await g.search(
             f"context and relationships for {req.entity}",
             num_results=20,
+            group_ids=[GROUP_ID],
         )
         return {
             "entity": req.entity,
             "facts": [{"fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None} for r in results],
         }
     except Exception as e:
+        logger.error("memory_get_context error: %s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/mcp/memory_task_log")
 async def memory_task_log(req: TaskLogRequest):
     g = await get_graphiti()
-    content_parts = [
+    content = "\n".join(filter(None, [
         f"Task: {req.task}",
         f"Status: {req.status}",
-        f"Files modified: {', '.join(req.files_modified) if req.files_modified else 'none'}",
-        f"Decisions: {'; '.join(req.decisions) if req.decisions else 'none'}",
-    ]
-    if req.notes:
-        content_parts.append(f"Notes: {req.notes}")
-    content = "\n".join(content_parts)
+        f"Files modified: {', '.join(req.files_modified) or 'none'}",
+        f"Decisions: {'; '.join(req.decisions) or 'none'}",
+        f"Notes: {req.notes}" if req.notes else None,
+    ]))
     try:
         await g.add_episode(
             name=f"task:{req.task[:60]}",
@@ -181,21 +215,32 @@ async def memory_task_log(req: TaskLogRequest):
             source=EpisodeType.text,
             source_description="agent_task_log",
             reference_time=datetime.now(timezone.utc),
+            group_id=GROUP_ID,
         )
         return {"status": "logged", "task": req.task, "task_status": req.status}
     except Exception as e:
+        logger.error("memory_task_log error: %s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/mcp/memory_snapshot")
 async def memory_snapshot():
-    """Return basic graph stats. Full export via Neo4j Browser at :7474."""
+    """Return raw facts from Neo4j directly (bypasses Graphiti search quirks)."""
     g = await get_graphiti()
     try:
-        results = await g.search("*", num_results=200)
-        return {
-            "total_facts": len(results),
-            "facts": [{"fact": r.fact, "valid_at": r.valid_at.isoformat() if r.valid_at else None} for r in results],
-        }
+        records, _, _ = await g.driver.execute_query(
+            """
+            MATCH ()-[r:RELATES_TO]->()
+            RETURN r.fact AS fact, r.valid_at AS valid_at, r.group_id AS group_id
+            ORDER BY r.created_at DESC
+            LIMIT 200
+            """
+        )
+        facts = [
+            {"fact": r["fact"], "valid_at": str(r["valid_at"]) if r["valid_at"] else None, "group_id": r["group_id"]}
+            for r in records
+        ]
+        return {"total_facts": len(facts), "facts": facts}
     except Exception as e:
+        logger.error("memory_snapshot error: %s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

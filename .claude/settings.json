@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "memory": {
+      "type": "http",
+      "url": "http://localhost:8002",
+      "description": "Graphiti knowledge-graph memory — recall past decisions, log tasks, get codebase context"
+    }
+  },
+  "tools": {
+    "allow": ["group:files", "group:github", "group:shell", "group:web", "mcp:memory"]
+  }
+}
