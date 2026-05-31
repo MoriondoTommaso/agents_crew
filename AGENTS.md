@@ -1,103 +1,229 @@
-# Coding Agent — Istruzioni per OpenCode
+# Coding Agent — Instructions for OpenCode
 
-Sei un agente di sviluppo software esperto. Hai accesso a tool per filesystem, git, GitHub, shell e memoria persistente.
+You are an expert software development agent. You have access to tools for
+filesystem, git, GitHub, shell, and persistent memory.
 
-## Stack del progetto
+## Project Stack
 
-| Componente | Dettaglio |
+| Component | Detail |
 |---|---|
-| Memoria persistente | Graphiti + Neo4j su `http://localhost:8002` |
-| LLM proxy | FreeLLMAPI su `http://localhost:3001/v1` (o altro endpoint via OPENAI_BASE_URL) |
-| Embedding/estrazione entità | Ollama locale (`nomic-embed-text`, `qwen2.5:1.5b`) |
-| Repo default | `MoriondoTommaso/agents_crew` |
+| Persistent memory | Graphiti + Neo4j at `http://localhost:8002` |
+| LLM proxy | FreeLLMAPI at `http://localhost:3001/v1` (swap via `OPENAI_BASE_URL`) |
+| Embeddings / entity extraction | Ollama local (`nomic-embed-text`, configurable) |
+| Default repo | `MoriondoTommaso/agents_crew` |
 
-## Tool disponibili
+## Available Tools
 
 ### Memory MCP (`http://localhost:8002`)
-| Tool | Quando usarlo |
+| Tool | When to use |
 |---|---|
-| `memory_recall` | **Sempre prima** — cerca contesto rilevante prima di iniziare |
-| `memory_get_context` | Per dettagli su un file o classe specifica |
-| `memory_add_episode` | Dopo ogni decisione significativa |
-| `memory_task_log` | **Sempre dopo** — logga il task completato |
-| `memory_snapshot` | Debug — esporta tutto il graph |
+| `memory_recall` | **Always first** — pull relevant context before starting |
+| `memory_get_context` | For details on a specific file or class |
+| `memory_add_episode` | After every non-obvious decision |
+| `memory_task_log` | **Always last** — log the completed task |
+| `memory_snapshot` | Debug — dump all raw graph facts |
 
 ### Built-in OpenCode
-- **File**: `read`, `write`, `edit`, `list_directory`
-- **Shell**: `bash` — esegui, testa, vedi output, correggi
-- **Git/GitHub**: branch, commit, PR
-- **Web**: ricerca documentazione
+- **Files**: `read`, `write`, `edit`, `list_directory`
+- **Shell**: `bash` — run, test, read output, fix
+- **Git / GitHub**: branch, commit, PR
+- **Web**: search documentation
 
-## Workflow standard (da seguire ogni volta)
+## Standard Workflow (follow every time)
 
 ```
-1. RECALL     memory_recall(query=<riassunto task>)
-              memory_get_context(entity=<file principale>)
+1. RECALL     memory_recall(query=<task summary>)
+              memory_get_context(entity=<main file>)
 
-2. PLAN       3-5 bullet points prima di scrivere codice
-              Minima diff — cambia solo quello necessario
+2. PLAN       3–5 bullet points before writing code
+              Minimal diff — change only what is necessary
 
-3. BRANCH     git checkout -b feat/<slug>  (mai lavorare su main)
+3. BRANCH     git checkout -b <type>/<slug>   ← NEVER work on main
 
-4. IMPLEMENT  read → edit → test
-              bash per eseguire e verificare output reale
-              memory_add_episode() per ogni decisione non ovvia
+4. IMPLEMENT  read → edit → bash (run/test) → read output → fix → repeat
+              memory_add_episode() for every non-obvious decision
 
-5. PR         gh pr create con titolo e descrizione chiari
+5. TEST       pytest tests/ -v --tb=short
+              ruff check <changed files>
+              Fix ALL failures before opening PR.
 
-6. LOG        memory_task_log(task, status, files_modified, decisions)
+6. PR         gh pr create --title "type(scope): description" --body "<what and why>"
+              Wait for CI to pass. Do NOT merge if CI is red.
+
+7. LOG        memory_task_log(task, status, files_modified, decisions, notes)
 ```
 
-## Regole assolute
+## 🛑 Hard Rules — Never Break These
 
-- **Mai committare su `main` direttamente**
-- **Mai saltare RECALL o LOG** — la memoria vale solo se aggiornata
-- Un branch per task: `feat/`, `fix/`, `chore/`, `refactor/`
-- Commit format: `type(scope): description` (es. `fix(memory): use ollama embedder`)
-- Type hints su tutte le funzioni
-- Testa il codice con `bash` prima di aprire PR
-- Diff minimali — non riformattare righe non toccate
+These are non-negotiable. Violating them will cause the PR to be rejected.
 
-## Struttura repo
+1. **Never `git push` to `main` directly.** Branch protection is enforced
+   server-side — the push will be rejected. Always use a feature branch.
+
+2. **Never open a PR if `pytest` or `ruff` fail locally.**
+   Run both before `gh pr create`. CI will catch it anyway, but it wastes time.
+
+3. **Never commit secrets, API keys, or `.env` files.**
+   Use `.env.example` for templates. Actual keys go in `.env` (gitignored).
+
+4. **Never skip RECALL at the start or LOG at the end.**
+   Memory is only useful if it is kept up to date.
+
+5. **Never install packages outside `pyproject.toml` or `requirements.txt`.**
+   If a new dependency is needed, add it to the project manifest first.
+
+6. **One branch per task.** Do not accumulate multiple unrelated changes
+   on a single branch.
+
+## CI Contract
+
+Every PR must pass all three CI jobs before merge:
+
+| Job | Command | Must pass |
+|---|---|---|
+| Lint | `ruff check memory/ tests/` | Yes |
+| Tests | `pytest tests/test_memory_service.py -v` | Yes (13/13) |
+| Docker build | `docker build ./memory` | Yes |
+
+If CI is red, fix the issue on the same branch before requesting merge.
+Do NOT open a new branch to work around a failing CI.
+
+## Branch Naming
+
+| Prefix | When |
+|---|---|
+| `feat/` | New feature |
+| `fix/` | Bug fix |
+| `chore/` | Tooling, deps, hygiene |
+| `refactor/` | Restructure with no behaviour change |
+| `docs/` | Documentation only |
+| `test/` | Tests only |
+
+## Commit Format
+
+```
+type(scope): short description
+```
+
+Examples:
+- `feat(memory): add DELETE /mcp/memory_clear endpoint`
+- `fix(bootstrap): handle empty Python files gracefully`
+- `chore(ci): add anyio to test dependencies`
+- `test(memory): cover snapshot pagination`
+
+## 📋 Task Backlog
+
+Pick one task at a time. Start with RECALL, end with LOG.
+Mark the task as in-progress by creating the branch — do not pick a task
+already being worked on (check open PRs first with `gh pr list`).
+
+### Priority 1 — Core Improvements
+
+**TASK-01: Add `DELETE /mcp/memory_clear` endpoint**
+- Branch: `feat/memory-clear-endpoint`
+- Description: Add an endpoint that deletes all episodes and facts for a given
+  `group_id` from Neo4j without wiping the whole database. Useful for resetting
+  memory without running `make clean`.
+- Acceptance: endpoint exists, returns `{"status": "cleared", "group_id": ...}`,
+  covered by at least one new test.
+
+**TASK-02: Bootstrap supports `.md` files**
+- Branch: `feat/bootstrap-markdown`
+- Description: `memory/bootstrap.py` currently only indexes `.py` files. Extend
+  it to also ingest `.md` files (AGENTS.md, README.md, MEMORY.md, skills/*.md)
+  as plain-text episodes so the agent can recall architectural decisions.
+- Acceptance: `.md` files appear in `memory_snapshot` after bootstrap.
+
+**TASK-03: `memory_recall` returns source file metadata**
+- Branch: `feat/recall-metadata`
+- Description: Each result from `memory_recall` currently returns `uuid`, `fact`,
+  and `valid_at`. Add `source_description` (the episode source field already
+  stored by Graphiti) to the response so the agent knows which file a fact
+  came from.
+- Acceptance: `results[n].source` present in response, test updated.
+
+### Priority 2 — Developer Experience
+
+**TASK-04: `make test` shortcut**
+- Branch: `chore/makefile-test-target`
+- Description: Add a `make test` target that runs `ruff check` + `pytest` locally
+  without Docker. Also add `make lint` as a standalone target.
+- Acceptance: `make test` exits 0 on clean repo, `make lint` exits 0.
+
+**TASK-05: Health endpoint returns Neo4j connectivity status**
+- Branch: `feat/health-neo4j-check`
+- Description: The `GET /health` endpoint currently returns static config values.
+  Add a live check: attempt a lightweight Cypher query (`RETURN 1`) and include
+  `"neo4j": "ok"` or `"neo4j": "unreachable"` in the response.
+- Acceptance: when Neo4j is up the field is `"ok"`, test mocks both states.
+
+**TASK-06: Bootstrap dry-run flag**
+- Branch: `feat/bootstrap-dry-run`
+- Description: Add a `--dry-run` flag to `bootstrap.py` that prints which files
+  would be ingested and how many chunks, without actually calling Graphiti.
+  Useful for debugging without burning API quota.
+- Acceptance: `python bootstrap.py --dry-run` prints a summary and exits 0.
+
+### Priority 3 — Observability
+
+**TASK-07: Structured JSON logging**
+- Branch: `feat/structured-logging`
+- Description: Replace the current `logging.basicConfig` in `service.py` with
+  structured JSON logging (one JSON object per line). Fields: `timestamp`,
+  `level`, `logger`, `message`, plus any extra kwargs passed to the log call.
+  Use stdlib only — no new dependencies.
+- Acceptance: each log line is valid JSON, existing tests still pass.
+
+**TASK-08: `GET /metrics` Prometheus endpoint**
+- Branch: `feat/prometheus-metrics`
+- Description: Add a `/metrics` endpoint exposing basic counters:
+  `memory_recall_total`, `memory_add_episode_total`, `memory_task_log_total`,
+  `memory_errors_total`. Use `prometheus_client` (add to Dockerfile deps).
+- Acceptance: `curl /metrics` returns valid Prometheus text format.
+
+## Repository Structure
 
 ```
 agents_crew/
-├── AGENTS.md              ← questo file (istruzioni agente)
-├── MEMORY.md              ← seed knowledge graph al bootstrap
+├── AGENTS.md              ← this file (agent instructions, authoritative)
+├── MEMORY.md              ← seed knowledge graph for bootstrap
 ├── Makefile               ← up / bootstrap / opencode / freellm / models
-├── .env.example           ← copia in .env e compila
+├── .env.example           ← copy to .env and fill in keys
 ├── .opencode/
-│   └── config.json        ← MCP config per OpenCode
+│   └── config.json        ← MCP config for OpenCode
 ├── memory/
 │   ├── Dockerfile
-│   ├── service.py         ← Graphiti MCP (embedding Ollama locale)
-│   └── bootstrap.py       ← scansione AST codebase → graph
-└── docker-compose.yml     ← 2 container: neo4j, memory
+│   ├── service.py         ← Graphiti MCP (5 tools, port 8002)
+│   └── bootstrap.py       ← codebase scan → knowledge graph
+├── tests/
+│   └── test_memory_service.py
+├── skills/
+│   ├── coding-workflow.md
+│   └── memory-agent.md
+└── docker-compose.yml     ← 2 containers: neo4j, memory
 ```
 
-## Modelli Ollama richiesti
+## Ollama Models Required
 
 ```bash
-ollama pull nomic-embed-text   # embedding (~274MB) — per Graphiti
-ollama pull qwen2.5:1.5b       # entity extraction (~1GB) — per Graphiti
+ollama pull nomic-embed-text   # embeddings (~274MB)
+ollama pull qwen2.5:1.5b       # entity extraction (~1GB, optional)
 ```
 
-## Quick reference comandi
+## Quick Reference
 
 ```bash
-make up          # avvia stack Docker (neo4j + memory)
-make bootstrap   # popola knowledge graph dal codebase (solo prima volta)
-make opencode    # lancia OpenCode puntato a FreeLLMAPI (o altro endpoint)
-make freellm     # avvia FreeLLMAPI server su :3001
-make models      # pull modelli Ollama necessari
-make logs        # segui tutti i log
-make down        # ferma tutto
-make clean       # ferma + distrugge volumi (reset completo)
+make up          # start Docker stack (neo4j + memory)
+make bootstrap   # seed knowledge graph from codebase
+make opencode    # launch OpenCode agent
+make freellm     # start FreeLLMAPI server on :3001
+make models      # pull Ollama models
+make logs        # follow all logs
+make down        # stop everything
+make clean       # stop + destroy volumes (full reset)
 ```
 
-## Cambio endpoint LLM (zero sbatti)
-
-Per usare un provider diverso basta cambiare due righe in `.env`:
+## LLM Endpoint Swap (zero friction)
 
 ```bash
 # FreeLLMAPI (default)
@@ -112,7 +238,7 @@ OPENAI_API_KEY=sk-or-...
 OPENAI_BASE_URL=https://api.groq.com/openai/v1
 OPENAI_API_KEY=gsk_...
 
-# Ollama locale puro
+# Local Ollama only
 OPENAI_BASE_URL=http://localhost:11434/v1
 OPENAI_API_KEY=ollama
 ```
