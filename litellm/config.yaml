@@ -1,4 +1,0 @@
-# ARCHIVED — LiteLLM rimosso dallo stack.
-# Routing LLM ora gestito da FreeLLMAPI (host) + OPENAI_BASE_URL in .env
-# Questo file viene mantenuto solo per cronologia git.
-# Non viene referenziato da nessun container o processo.
