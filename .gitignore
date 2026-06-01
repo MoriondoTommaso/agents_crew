@@ -18,7 +18,4 @@ Thumbs.db
 .opencode/
 *.log
 
-.opencode/
-roadmap.md
-
 .ruff_cache/
