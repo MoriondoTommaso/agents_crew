@@ -89,7 +89,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8002/health"]
+      test: ["CMD", "curl", "-sf", "-o", "/dev/null", "http://localhost:8002/sse"]
       interval: 20s
       timeout: 10s
       retries: 3
