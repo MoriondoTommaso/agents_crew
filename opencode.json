@@ -1,0 +1,16 @@
+{
+  "provider": "openai",
+  "model": "qwen2.5-coder:14b",
+  "providers": {
+    "openai": {
+      "apiKey": "freell",
+      "baseURL": "http://localhost:3001/v1"
+    }
+  },
+  "mcp": {
+    "memory": {
+      "type": "sse",
+      "url": "http://localhost:8002/sse"
+    }
+  }
+}
