@@ -35,19 +35,9 @@ freellm:
 	fi
 	cd ../freellmapi && npm run dev
 
-# ── Memory bootstrap (run once after first make up) ────────────────────────
+# ── Memory bootstrap (seed the knowledge graph from any project) ──────────
 bootstrap:
-	@EMBED_PROVIDER=$$(grep -v '^#' .env 2>/dev/null | grep GRAPHITI_EMBED_PROVIDER | cut -d= -f2); \
-		EMBED_PROVIDER=$${EMBED_PROVIDER:-ollama}; \
-		if [ "$$EMBED_PROVIDER" = "ollama" ]; then \
-			echo "Pulling Ollama embedder model ..."; \
-			ollama pull $$(grep -v '^#' .env 2>/dev/null | grep GRAPHITI_EMBED_MODEL | cut -d= -f2 || echo nomic-embed-text); \
-		else \
-			echo "Embed provider is '$$EMBED_PROVIDER' — skipping ollama pull."; \
-		fi
-	@echo "Seeding knowledge graph from codebase ..."
-	docker compose exec memory python bootstrap.py
-	@echo "Bootstrap complete."
+	@bash bootstrap.sh "$(CURDIR)" "$(GROUP_ID)"
 
 # ── Ollama model management ─────────────────────────────────────────────────────────
 models:

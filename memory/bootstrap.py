@@ -1,126 +1,192 @@
-"""bootstrap.py — Scan the codebase and seed the Graphiti knowledge graph.
+"""Cross-project bootstrap — scan any directory and seed the knowledge graph.
 
-Run once after `make up` to populate the graph with existing code structure:
+Persists filesystem structure into Graphiti memory as episodes, grouped by
+directory, so future ``memory_recall`` calls can retrieve project context.
 
-    docker compose exec memory python bootstrap.py
+Usage (from inside the memory container or a sibling container):
 
-What it does:
-  1. Walks /workspace looking for .py files (skips venv, __pycache__, .git)
-  2. For each file: AST-parses classes, functions, imports
-  3. Ingests one episode per file into Graphiti (with delay for rate limits)
-  4. Ingests one episode per key decision from MEMORY.md if it exists
+    python /app/bootstrap.py \\
+        --dir /workspace \\
+        --group-id my-project
+
+The equivalent one-liner from any project directory (requires the memory-mcp
+Docker image and a running Neo4j container):
+
+    docker run --rm \\
+        --network container:memory \\
+        -v "$(pwd):/workspace:ro" \\
+        -e NEO4J_PASSWORD=... \\
+        memory-mcp:latest \\
+        python /app/bootstrap.py --dir /workspace --group-id "$(basename "$(pwd)")"
 """
 
-import ast
+import argparse
 import asyncio
+import logging
 import os
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
-import httpx
+logging.basicConfig(level=logging.INFO, format="[bootstrap] %(message)s")
+logger = logging.getLogger("bootstrap")
 
-MEMORY_BASE     = os.getenv("MEMORY_SERVICE_URL", "http://localhost:8002")
-WORKSPACE       = Path(os.getenv("WORKSPACE_ROOT", "/workspace"))
-INGEST_TIMEOUT  = int(os.getenv("BOOTSTRAP_TIMEOUT", "300"))
+SKIP_DIRS = {
+    ".git", "__pycache__", ".venv", "venv", ".env", "env",
+    "node_modules", ".npm", ".yarn", "bower_components",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "dist", "build", ".next", ".nuxt", ".output",
+    "target", "bin", "obj",
+    ".idea", ".vscode", ".DS_Store",
+    "coverage", ".coverage",
+}
 
-# Delay between episodes (seconds). Free-tier LLM providers (OpenRouter, Groq)
-# have rate limits of ~20 req/min. Graphiti uses ~6 LLM calls per episode.
-# 35s gives comfortable headroom; set to 0 if using a paid plan.
-EPISODE_DELAY   = int(os.getenv("BOOTSTRAP_EPISODE_DELAY", "35"))
+SKIP_FILES = {
+    ".env", ".env.example", ".env.local", ".env.production",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    ".DS_Store", "Thumbs.db",
+}
 
-SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".mypy_cache", ".pytest_cache"}
+CODE_EXTS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".go", ".rs", ".rb", ".php", ".java", ".kt", ".swift",
+    ".c", ".cpp", ".h", ".hpp", ".cs", ".scala", ".ex", ".exs",
+    ".svelte", ".vue", ".astro",
+}
+DOC_EXTS = {".md", ".rst", ".txt", ".mdx"}
+CONFIG_EXTS = {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
+WEB_EXTS = {".html", ".css", ".scss", ".sass", ".less"}
+DEVOPS_EXTS = {".dockerfile", ".tf", ".sql"}
+ALL_EXTS = CODE_EXTS | DOC_EXTS | CONFIG_EXTS | WEB_EXTS | DEVOPS_EXTS
+
+MAX_CONTENT_CHARS = 800
 
 
-def extract_symbols(path: Path) -> dict:
+def _count_tokens(text: str) -> int:
+    return len(text) // 4
+
+
+def _file_summary(path: Path) -> str | None:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-    except SyntaxError:
-        return {}
-
-    classes   = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-    functions = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-    imports   = []
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Import):
-            imports += [a.name for a in n.names]
-        elif isinstance(n, ast.ImportFrom) and n.module:
-            imports.append(n.module)
-
-    return {"classes": classes, "functions": functions, "imports": imports}
-
-
-def build_episode(rel_path: str, symbols: dict) -> str:
-    lines = [f"File: {rel_path}"]
-    if symbols.get("classes"):
-        lines.append(f"Classes: {', '.join(symbols['classes'])}")
-    if symbols.get("functions"):
-        lines.append(f"Functions: {', '.join(symbols['functions'][:20])}")
-    if symbols.get("imports"):
-        lines.append(f"Imports: {', '.join(set(symbols['imports'][:15]))}")
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    if not text.strip():
+        return None
+    ext = path.suffix.lower()
+    lines = []
+    if ext in CODE_EXTS:
+        if ext == ".py":
+            try:
+                import ast
+                tree = ast.parse(text)
+                classes = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+                funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+                ifaces = [n.names[0].asname or n.names[0].name for n in ast.walk(tree) if isinstance(n, ast.Import)]
+                ifaces += [n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module]
+                if classes:
+                    lines.append(f"Classes: {', '.join(classes)}")
+                if funcs:
+                    lines.append(f"Functions ({len(funcs)}): {', '.join(funcs[:15])}")
+                if ifaces:
+                    lines.append(f"Dependencies: {', '.join(sorted(set(ifaces))[:10])}")
+            except SyntaxError:
+                pass
+        if not lines:
+            lines.append(f"Language: {ext.lstrip('.')}")
+        token_count = _count_tokens(text)
+        preview = text[:MAX_CONTENT_CHARS].strip()
+        lines.append(f"Size: {len(text)} chars, ~{token_count} tokens")
+        lines.append(f"Preview:\n{preview}")
+    elif ext in DOC_EXTS:
+        lines.append(f"Content ({len(text)} chars):\n{text[:MAX_CONTENT_CHARS].strip()}")
+    elif ext in CONFIG_EXTS:
+        lines.append(f"Config ({len(text)} chars):\n{text[:MAX_CONTENT_CHARS].strip()}")
+    else:
+        lines.append(f"Size: {len(text)} chars")
+        lines.append(text[:MAX_CONTENT_CHARS].strip())
     return "\n".join(lines)
 
 
-async def ingest_episode(client: httpx.AsyncClient, name: str, content: str, source: str = "bootstrap"):
-    resp = await client.post(
-        f"{MEMORY_BASE}/mcp/memory_add_episode",
-        json={"name": name, "content": content, "source": source},
-        timeout=INGEST_TIMEOUT,
-    )
-    resp.raise_for_status()
+def _scan_directory(root: Path) -> list[Path]:
+    files = []
+    for entry in root.rglob("*"):
+        rel = entry.relative_to(root)
+        parts = set(rel.parts[:-1])
+        if parts & SKIP_DIRS:
+            continue
+        if not entry.is_file():
+            continue
+        if entry.name in SKIP_FILES:
+            continue
+        ext = entry.suffix.lower()
+        if ext not in ALL_EXTS:
+            continue
+        files.append(entry)
+    files.sort(key=lambda p: (len(p.parents), p.name))
+    return files
+
+
+from graphiti_core.nodes import EpisodeType
+from service import get_graphiti
 
 
 async def main():
-    print(f"[bootstrap] Scanning {WORKSPACE} ...")
-    py_files = []
-    for root, dirs, files in os.walk(WORKSPACE):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+    parser = argparse.ArgumentParser(description="Seed knowledge graph from a project directory.")
+    parser.add_argument("--dir", default="/workspace", help="Project directory to scan (default: /workspace)")
+    parser.add_argument("--group-id", default=None, help="Memory namespace (default: GRAPHITI_GROUP_ID env or dir name)")
+    parser.add_argument("--delay", type=float, default=None, help="Seconds between episodes for rate limiting")
+    parser.add_argument("--dry-run", action="store_true", help="Only list files, don't ingest")
+    args = parser.parse_args()
+
+    project_root = Path(args.dir).resolve()
+    group_id = args.group_id or os.getenv("GRAPHITI_GROUP_ID") or project_root.name
+    delay = args.delay if args.delay is not None else float(os.getenv("BOOTSTRAP_EPISODE_DELAY", "0"))
+    dry_run = args.dry_run
+
+    logger.info("Project: %s", project_root)
+    logger.info("Group:   %s", group_id)
+    logger.info("Dry run: %s", dry_run)
+
+    files = _scan_directory(project_root)
+    logger.info("Found %d files to ingest", len(files))
+
+    if dry_run:
         for f in files:
-            if f.endswith(".py"):
-                py_files.append(Path(root) / f)
+            rel = f.relative_to(project_root)
+            print(f"  {rel}")
+        return
 
-    print(f"[bootstrap] Found {len(py_files)} Python files")
-    print(f"[bootstrap] Timeout per episode: {INGEST_TIMEOUT}s")
-    if EPISODE_DELAY > 0:
-        print(f"[bootstrap] Delay between episodes: {EPISODE_DELAY}s (set BOOTSTRAP_EPISODE_DELAY=0 for paid plans)")
-    est = len(py_files) * (EPISODE_DELAY + 30) // 60
-    print(f"[bootstrap] Estimated time: ~{max(1, est)} min")
+    logger.info("Connecting to Graphiti ...")
+    g = await get_graphiti()
+    logger.info("Connected. Group ID: %s", group_id)
 
-    async with httpx.AsyncClient() as client:
-        for _ in range(10):
-            try:
-                r = await client.get(f"{MEMORY_BASE}/health", timeout=5)
-                if r.status_code == 200:
-                    break
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-        else:
-            raise RuntimeError("Memory service not reachable")
+    total = len(files)
+    for i, path in enumerate(files, 1):
+        rel = path.relative_to(project_root)
+        summary = _file_summary(path)
+        if summary is None:
+            logger.info("  [%d/%d] %s — skipped (empty/unreadable)", i, total, rel)
+            continue
+        content = f"File: {rel}\n{summary}"
+        name = f"file:{rel}"
+        logger.info("  [%d/%d] %s", i, total, rel)
+        try:
+            await g.add_episode(
+                name=name,
+                episode_body=content,
+                source=EpisodeType.text,
+                source_description="bootstrap",
+                reference_time=datetime.now(UTC),
+                group_id=group_id,
+            )
+        except Exception as e:
+            logger.warning("  ⚠ %s — %s", rel, e)
+        if delay > 0 and i < total:
+            logger.info("  ⏳ waiting %.1fs …", delay)
+            await asyncio.sleep(delay)
 
-        total = len(py_files)
-        for i, path in enumerate(py_files, 1):
-            rel = str(path.relative_to(WORKSPACE))
-            symbols = extract_symbols(path)
-            if not symbols:
-                continue
-            content = build_episode(rel, symbols)
-            print(f"  [{i}/{total}] ingesting {rel} ...", end=" ", flush=True)
-            await ingest_episode(client, f"file:{rel}", content, source="bootstrap")
-            print("✓")
-            if EPISODE_DELAY > 0 and i < total:
-                print(f"  ⏳ waiting {EPISODE_DELAY}s for rate limit ...")
-                await asyncio.sleep(EPISODE_DELAY)
-
-        memory_md = WORKSPACE / "MEMORY.md"
-        if memory_md.exists():
-            if EPISODE_DELAY > 0:
-                print(f"  ⏳ waiting {EPISODE_DELAY}s before MEMORY.md ...")
-                await asyncio.sleep(EPISODE_DELAY)
-            content = memory_md.read_text(encoding="utf-8")
-            print(f"  [{total+1}/{total+1}] ingesting MEMORY.md ...", end=" ", flush=True)
-            await ingest_episode(client, "MEMORY.md", content, source="bootstrap")
-            print("✓")
-
-    print("[bootstrap] Done.")
+    logger.info("Done — %d files ingested into group '%s'", total, group_id)
 
 
 if __name__ == "__main__":
