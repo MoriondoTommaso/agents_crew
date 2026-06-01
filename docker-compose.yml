@@ -1,22 +1,17 @@
 # docker-compose.yml
-# Coding agent stack — FreeLLMAPI + OpenCode edition
+# Coding agent stack
 #
 #   neo4j   — Graph database for Graphiti memory (ports 7474 7687)
 #   memory  — Graphiti knowledge-graph MCP service (port 8002)
 #
 # LLM routing is handled by FreeLLMAPI running on the HOST (not Docker).
-# OpenCode CLI runs on the HOST and speaks OpenAI format to FreeLLMAPI.
-#
-# Prerequisites (host machine):
-#   cd ../freellmapi && npm run dev   # FreeLLMAPI on :3001
-#   ollama serve                      # Ollama on :11434
-#   ollama pull nomic-embed-text
+# OpenCode CLI runs on the HOST and speaks OpenAI format to the LLM endpoint.
 #
 # Usage:
 #   make up        → start neo4j + memory
 #   make bootstrap → seed knowledge graph (run once)
 #   make opencode  → launch OpenCode agent
-#   make freellm   → start FreeLLMAPI server
+#   make freellm   → start FreeLLMAPI server (if using FreeLLMAPI)
 #   make logs      → follow all logs
 #   make down      → stop everything
 
@@ -44,7 +39,7 @@ services:
       retries: 10
       start_period: 60s
 
-  # ── 2. Graphiti Memory MCP service ───────────────────────────────────────
+  # ── 2. Graphiti Memory MCP service ──────────────────────────────────────
   memory:
     build:
       context: ./memory
@@ -58,24 +53,35 @@ services:
       - .env
     environment:
       # Neo4j — always internal
-      NEO4J_URI:                  bolt://neo4j:7687
-      NEO4J_USER:                 neo4j
-      NEO4J_PASSWORD:             ${NEO4J_PASSWORD:-changeme}
-      # Ollama embedder — reaches host via host.docker.internal
-      OLLAMA_BASE_URL:            ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      GRAPHITI_EMBED_MODEL:       ${GRAPHITI_EMBED_MODEL:-nomic-embed-text}
-      GRAPHITI_EMBED_DIM:         ${GRAPHITI_EMBED_DIM:-768}
-      # LLM for entity extraction — read from .env, no hardcoded fallback model
-      FREELLM_BASE_URL:           ${FREELLM_BASE_URL:-http://host.docker.internal:3001/v1}
-      FREELLM_API_KEY:            ${FREELLM_API_KEY:-freellm}
-      GRAPHITI_LLM_MODEL:         ${GRAPHITI_LLM_MODEL:-auto}
+      NEO4J_URI:                    bolt://neo4j:7687
+      NEO4J_USER:                   neo4j
+      NEO4J_PASSWORD:               ${NEO4J_PASSWORD:-changeme}
+
+      # LLM for entity extraction — reaches host via host.docker.internal
+      FREELLM_BASE_URL:             ${FREELLM_BASE_URL:-http://host.docker.internal:3001/v1}
+      FREELLM_API_KEY:              ${FREELLM_API_KEY:-freellm}
+      GRAPHITI_LLM_MODEL:           ${GRAPHITI_LLM_MODEL:-auto}
+
+      # Embeddings — Mode A (Ollama local) or Mode B (cloud)
+      # Set GRAPHITI_EMBED_PROVIDER=openai in .env to disable Ollama requirement.
+      GRAPHITI_EMBED_PROVIDER:      ${GRAPHITI_EMBED_PROVIDER:-ollama}
+      GRAPHITI_EMBED_MODEL:         ${GRAPHITI_EMBED_MODEL:-nomic-embed-text}
+      GRAPHITI_EMBED_DIM:           ${GRAPHITI_EMBED_DIM:-768}
+      # Mode A: Ollama (default)
+      OLLAMA_BASE_URL:              ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      # Mode B: cloud endpoint — only used when GRAPHITI_EMBED_PROVIDER != ollama
+      GRAPHITI_EMBED_BASE_URL:      ${GRAPHITI_EMBED_BASE_URL:-}
+      GRAPHITI_EMBED_API_KEY:       ${GRAPHITI_EMBED_API_KEY:-}
+
       # Graph namespace
-      GRAPHITI_GROUP_ID:          ${GRAPHITI_GROUP_ID:-agents}
+      GRAPHITI_GROUP_ID:            ${GRAPHITI_GROUP_ID:-agents}
+
       # Bootstrap tuning
-      BOOTSTRAP_TIMEOUT:          ${BOOTSTRAP_TIMEOUT:-600}
-      BOOTSTRAP_EPISODE_DELAY:    ${BOOTSTRAP_EPISODE_DELAY:-0}
+      BOOTSTRAP_TIMEOUT:            ${BOOTSTRAP_TIMEOUT:-600}
+      BOOTSTRAP_EPISODE_DELAY:      ${BOOTSTRAP_EPISODE_DELAY:-0}
+
     volumes:
-      # Mount the repo root so bootstrap.py can scan all Python source files
+      # Mount the repo root so bootstrap.py can scan all source files
       - .:/workspace:ro
     depends_on:
       neo4j:
