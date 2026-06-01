@@ -26,19 +26,60 @@ FREELLM_BASE   = os.getenv("FREELLM_BASE_URL",     "http://host.docker.internal:
 FREELLM_KEY    = os.getenv("FREELLM_API_KEY",      os.getenv("OPENAI_API_KEY", "freellm"))
 LLM_MODEL      = os.getenv("GRAPHITI_LLM_MODEL",   "auto")
 
-OLLAMA_BASE    = os.getenv("OLLAMA_BASE_URL",       "http://host.docker.internal:11434")
-EMBED_MODEL    = os.getenv("GRAPHITI_EMBED_MODEL",  "nomic-embed-text")
-EMBED_DIM      = int(os.getenv("GRAPHITI_EMBED_DIM", "768"))
-OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
+# ── Embedder config — two modes ─────────────────────────────────────────────
+# Mode A (default): Ollama local — free, no internet, needs `ollama serve`
+#   GRAPHITI_EMBED_PROVIDER=ollama  (default)
+#   GRAPHITI_EMBED_MODEL=nomic-embed-text
+#   GRAPHITI_EMBED_DIM=768
+#
+# Mode B: any OpenAI-compatible cloud endpoint — no Ollama required
+#   GRAPHITI_EMBED_PROVIDER=openai
+#   GRAPHITI_EMBED_BASE_URL=https://api.openai.com/v1
+#   GRAPHITI_EMBED_API_KEY=sk-...
+#   GRAPHITI_EMBED_MODEL=text-embedding-3-small
+#   GRAPHITI_EMBED_DIM=1536
+#
+# Works with: OpenAI, Groq, VoyageAI, OpenRouter, any /embeddings endpoint.
 
-GROUP_ID       = os.getenv("GRAPHITI_GROUP_ID", "agents")
+OLLAMA_BASE         = os.getenv("OLLAMA_BASE_URL",          "http://host.docker.internal:11434")
+EMBED_PROVIDER      = os.getenv("GRAPHITI_EMBED_PROVIDER",  "ollama")  # "ollama" | "openai"
+
+_OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
+
+# Base URL for embeddings: default to Ollama, override with GRAPHITI_EMBED_BASE_URL
+EMBED_BASE_URL      = os.getenv("GRAPHITI_EMBED_BASE_URL",
+                                 _OLLAMA_OPENAI_BASE if EMBED_PROVIDER == "ollama"
+                                 else "https://api.openai.com/v1")
+
+# API key for embeddings: Ollama needs no key; cloud endpoints need one
+EMBED_API_KEY       = os.getenv("GRAPHITI_EMBED_API_KEY",
+                                 "ollama" if EMBED_PROVIDER == "ollama"
+                                 else os.getenv("OPENAI_API_KEY", ""))
+
+# Default model + dimension per provider
+_DEFAULT_MODEL = "nomic-embed-text" if EMBED_PROVIDER == "ollama" else "text-embedding-3-small"
+_DEFAULT_DIM   = "768"              if EMBED_PROVIDER == "ollama" else "1536"
+
+EMBED_MODEL  = os.getenv("GRAPHITI_EMBED_MODEL", _DEFAULT_MODEL)
+EMBED_DIM    = int(os.getenv("GRAPHITI_EMBED_DIM", _DEFAULT_DIM))
+
+GROUP_ID     = os.getenv("GRAPHITI_GROUP_ID", "agents")
 
 
 # ── Embedder proxy ────────────────────────────────────────────────────────────
 class _EmbedderProxy:
-    def __init__(self, model: str, base_url: str):
-        self._model = model
-        self._client = AsyncOpenAI(api_key="ollama", base_url=base_url)
+    """Thin wrapper that routes embedding calls to the configured endpoint."""
+
+    def __init__(self):
+        self._model = EMBED_MODEL
+        self._client = AsyncOpenAI(
+            api_key=EMBED_API_KEY,
+            base_url=EMBED_BASE_URL,
+        )
+        logger.info(
+            "Embedder: provider=%s model=%s base_url=%s dim=%d",
+            EMBED_PROVIDER, EMBED_MODEL, EMBED_BASE_URL, EMBED_DIM,
+        )
 
     async def create(self, **kwargs):
         kwargs["model"] = self._model
@@ -46,9 +87,10 @@ class _EmbedderProxy:
 
 
 class _PatchedOpenAIClient(OpenAIClient):
-    """OpenAIClient with embedder redirected to Ollama."""
+    """OpenAIClient with embedder redirected to the configured provider."""
+
     def get_embedder(self):
-        return _EmbedderProxy(EMBED_MODEL, OLLAMA_OPENAI_BASE)
+        return _EmbedderProxy()
 
 
 # ── Index creation ─────────────────────────────────────────────────────────────
@@ -77,7 +119,7 @@ async def _build_indices(driver, dim: int):
 
 
 # ── App + Graphiti singleton (async-safe) ─────────────────────────────────────
-app = FastAPI(title="Memory MCP Service", version="2.3.0")
+app = FastAPI(title="Memory MCP Service", version="2.4.0")
 _graphiti: Graphiti | None = None
 _graphiti_lock = asyncio.Lock()
 
@@ -87,7 +129,10 @@ async def get_graphiti() -> Graphiti:
     if _graphiti is None:
         async with _graphiti_lock:
             if _graphiti is None:  # double-checked locking
-                logger.info("Initializing Graphiti: LLM=%s @ %s group_id=%s", LLM_MODEL, FREELLM_BASE, GROUP_ID)
+                logger.info(
+                    "Initializing Graphiti: LLM=%s @ %s  embed=%s/%s(%dd)  group_id=%s",
+                    LLM_MODEL, FREELLM_BASE, EMBED_PROVIDER, EMBED_MODEL, EMBED_DIM, GROUP_ID,
+                )
                 llm = _PatchedOpenAIClient(
                     config=LLMConfig(
                         model=LLM_MODEL,
@@ -130,10 +175,15 @@ class TaskLogRequest(BaseModel):
 # ── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "memory-mcp", "version": "2.3.0",
-            "llm": f"{FREELLM_BASE} / {LLM_MODEL}",
-            "embedder": f"{OLLAMA_BASE} / {EMBED_MODEL} ({EMBED_DIM}d)",
-            "group_id": GROUP_ID}
+    return {
+        "status": "ok",
+        "service": "memory-mcp",
+        "version": "2.4.0",
+        "llm": f"{FREELLM_BASE} / {LLM_MODEL}",
+        "embed_provider": EMBED_PROVIDER,
+        "embedder": f"{EMBED_BASE_URL} / {EMBED_MODEL} ({EMBED_DIM}d)",
+        "group_id": GROUP_ID,
+    }
 
 
 @app.get("/tools")
