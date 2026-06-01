@@ -21,11 +21,8 @@ logs:
 # ── OpenCode agent ────────────────────────────────────────────────────────────────
 opencode:
 	@if [ ! -f .env ]; then echo "ERROR: .env file not found. Copy .env.example to .env and fill in your keys."; exit 1; fi
-	@echo "Starting OpenCode (OPENAI_BASE_URL=$$(grep OPENAI_BASE_URL .env | cut -d= -f2)) ..."
-	@export $$(grep -v '^#' .env | grep -v '^$$' | xargs) 2>/dev/null; \
-		OPENAI_BASE_URL=$${OPENAI_BASE_URL:-http://localhost:3001/v1} \
-		OPENAI_API_KEY=$${OPENAI_API_KEY} \
-		opencode
+	@echo "Starting OpenCode ..."
+	@env $$(grep -v '^#' .env | grep -v '^$$' | xargs) opencode
 
 # ── FreeLLMAPI server (runs on host, not in Docker) ────────────────────────
 freellm:
