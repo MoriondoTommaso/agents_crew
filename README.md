@@ -2,160 +2,142 @@
 
 [![CI](https://github.com/MoriondoTommaso/agents_crew/actions/workflows/ci.yml/badge.svg)](https://github.com/MoriondoTommaso/agents_crew/actions/workflows/ci.yml)
 
-Infrastruttura per sviluppo agentico con **OpenCode** come harness,
-**FreeLLMAPI** per routing ibrido frontier/locale, e **Graphiti** per
-memoria persistente cross-sessione.
+Infrastructure for agentic development with **OpenCode** as harness and
+**Graphiti** for persistent cross-session memory via Neo4j.
 
-Zero costi API per embedding — tutto locale via Ollama.
+Embeddings and entity extraction run entirely on **Ollama** — zero API costs.
 
-## Architettura
+## Architecture
 
 ```
-OpenCode CLI (host Mac/Linux)
+OpenCode CLI (Mac/Linux host)
     │  OPENAI_BASE_URL=http://localhost:3001/v1
     ▼
-FreeLLMAPI :3001  (o qualsiasi endpoint OpenAI-compatible)
-    ├── planning / architettura / review  →  cloud (Gemini, GPT-4o, Claude…)
-    └── code generation                  →  Ollama locale (opzionale)
+FreeLLMAPI / OpenRouter / Groq / local Ollama  :3001
+    └── planning, architecture, review, code gen
 
-MCP: Memory service :8002  (Docker)
-    └── Graphiti + Neo4j
-            ├── embedding:          Ollama nomic-embed-text  (locale, gratuito)
-            └── entity extraction:  FreeLLMAPI / Ollama      (configurabile)
+OpenCode MCP client
+    │  SSE → http://localhost:8002/sse
+    ▼
+Memory service (Docker, port 8002)
+    └── FastMCP (4 tools) → Graphiti → Neo4j 5.26
+            ├── embedding:          Ollama nomic-embed-text (OLLAMA_BASE_URL/v1/embeddings)
+            └── entity extraction:  FreeLLMAPI / Ollama responses (FREELLM_BASE_URL)
 ```
 
-## Struttura repo
-
-```
-agents_crew/
-├── AGENTS.md                  ← istruzioni comportamento per OpenCode
-├── MEMORY.md                  ← seed knowledge graph (bootstrap)
-├── Makefile                   ← comandi up / bootstrap / opencode / models
-├── .env.example               ← template variabili d'ambiente
-├── .opencode/
-│   └── config.json            ← MCP config per OpenCode
-├── memory/
-│   ├── Dockerfile
-│   ├── service.py             ← Graphiti MCP, 5 tool, porta 8002
-│   └── bootstrap.py           ← scansione codebase → knowledge graph
-├── docker-compose.yml         ← 2 container: neo4j, memory
-└── tests/
-    └── test_memory_service.py ← 13 test, zero dipendenze esterne
-```
+MCP transport is pure SSE — no REST, no health endpoint, no HTTP verbs.
 
 ## Quick Start
 
-### Prerequisiti
+### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [Ollama](https://ollama.com/) in esecuzione sull'host
+- [Ollama](https://ollama.com/) running on the host (`ollama serve`)
 - [OpenCode CLI](https://opencode.ai) — `npm i -g opencode-ai`
-- FreeLLMAPI o qualsiasi endpoint OpenAI-compatible
-- GitHub personal access token con scope `repo`
+- FreeLLMAPI or any OpenAI-compatible endpoint
+- GitHub personal access token with scope `repo`
 
-### 1. Clona e configura
+### 1. Clone and configure
 
 ```bash
 git clone https://github.com/MoriondoTommaso/agents_crew
 cd agents_crew
 cp .env.example .env
+# edit .env with your credentials
 ```
 
-Modifica `.env` con il tuo endpoint e credenziali:
+Required variables in `.env`:
 
-```bash
-# LLM endpoint (FreeLLMAPI, OpenRouter, Groq, Ollama puro...)
-OPENAI_BASE_URL=http://localhost:3001/v1
-OPENAI_API_KEY=la-tua-chiave
+| Variable | Default | Description |
+|---|---|---|
+| `OPENAI_BASE_URL` | `http://localhost:3001/v1` | LLM endpoint for OpenCode |
+| `OPENAI_API_KEY` | — | API key for the LLM provider |
+| `NEO4J_PASSWORD` | `changeme` | ⚠️ Change before first run |
+| `FREELLM_BASE_URL` | `http://host.docker.internal:3001/v1` | LLM for entity extraction (inside Docker) |
+| `FREELLM_API_KEY` | falls back to `OPENAI_API_KEY` | API key for entity extraction LLM |
+| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama endpoint for embeddings |
 
-# Memory service
-NEO4J_PASSWORD=cambia-questa
-GRAPHITI_LLM_MODEL=auto
-
-# GitHub
-GITHUB_TOKEN=ghp_...
-```
-
-### 2. Pull modelli Ollama
+### 2. Pull Ollama models
 
 ```bash
 make models
-# → nomic-embed-text   274MB   embedding memoria
-# → qwen2.5:1.5b       ~1GB    entity extraction memoria (opzionale)
+# → nomic-embed-text   274MB   embeddings
 ```
 
-### 3. Avvia lo stack
+### 3. Start the stack
 
 ```bash
 make up
 ```
 
-| Container | Porta | Ruolo |
+| Container | Port | Role |
 |---|---|---|
 | `neo4j` | 7474 / 7687 | Graph database |
-| `memory` | 8002 | Graphiti MCP service |
+| `memory` | 8002 | Graphiti MCP service (FastMCP SSE) |
 
-### 4. Seed knowledge graph (solo prima volta)
+### 4. Seed the knowledge graph (first time only)
 
 ```bash
 make bootstrap
-# scansiona .py del repo e ingesta struttura nel knowledge graph
+# scans .py files in the repo and ingests structure into the knowledge graph
 ```
 
-### 5. Lancia OpenCode
+### 5. Launch OpenCode
 
 ```bash
 make opencode
-# oppure direttamente:
-opencode
 ```
 
-OpenCode legge `AGENTS.md` automaticamente, carica il MCP memory
-da `.opencode/config.json`, e usa FreeLLMAPI come backend LLM.
+OpenCode reads the MCP server config from `~/.config/opencode/opencode.jsonc`
+(or a local `opencode.json` per project).
 
-## Workflow agentico
+Example global config (`~/.config/opencode/opencode.jsonc`):
 
-Ogni sessione segue questo loop:
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "memory": {
+        "url": "http://localhost:8002/sse"
+      }
+    }
+  }
+}
+```
+
+## Agentic workflow
+
+Every session follows this loop:
 
 ```
-1. RECALL     cerca contesto rilevante in Graphiti
-2. PLAN       pianifica la minima diff necessaria
-3. BRANCH     git checkout -b feat/<slug>  (mai su main)
-4. IMPLEMENT  write → bash → leggi output → correggi → ripeti
+1. RECALL     memory_recall — semantic search over the knowledge graph
+2. PLAN       plan the minimum diff needed
+3. BRANCH     git checkout -b feat/<slug> (never main)
+4. IMPLEMENT  write → bash → read output → fix → repeat
 5. PR         gh pr create
-6. LOG        memory_task_log → salva nel knowledge graph
+6. LOG        memory_task_log — persist task outcome to the knowledge graph
 ```
 
-## Memory MCP — tool disponibili
+## Memory MCP — available tools
 
-Endpoint base: `http://localhost:8002`
-
-| Tool | Endpoint | Descrizione |
+| Tool | Arguments | Description |
 |---|---|---|
-| `memory_recall` | `POST /mcp/memory_recall` | Ricerca semantica nel graph |
-| `memory_add_episode` | `POST /mcp/memory_add_episode` | Ingesta un episodio |
-| `memory_get_context` | `POST /mcp/memory_get_context` | Contesto per entità/file |
-| `memory_task_log` | `POST /mcp/memory_task_log` | Log task completato/fallito |
-| `memory_snapshot` | `GET /mcp/memory_snapshot` | Export graph (debug) |
+| `memory_recall` | `query: str, limit?: int` | Semantic search over graph facts |
+| `memory_add_episode` | `name: str, content: str, source?: str` | Ingest a new episode (triggers LLM entity extraction) |
+| `memory_get_context` | `entity: str` | Retrieve all graph facts for a specific entity |
+| `memory_task_log` | `task: str, status: str, files_modified?: list[str], decisions?: list[str], notes?: str` | Log a completed/failed task |
 
-```bash
-# Health check
-curl http://localhost:8002/health
+All tools return JSON via MCP protocol (SSE transport).
 
-# Ricerca manuale
-curl -s -X POST http://localhost:8002/mcp/memory_recall \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "routing config", "limit": 5}'
-```
+## Changing the LLM endpoint
 
-## Cambio endpoint LLM (zero sbatti)
-
-Basta cambiare due righe in `.env` — nessun riavvio di container:
+Edit `.env` — no container restart needed:
 
 ```bash
 # FreeLLMAPI (default)
 OPENAI_BASE_URL=http://localhost:3001/v1
-OPENAI_API_KEY=freellmapi-...
+OPENAI_API_KEY=your-key
 
 # OpenRouter
 OPENAI_BASE_URL=https://openrouter.ai/api/v1
@@ -165,75 +147,65 @@ OPENAI_API_KEY=sk-or-...
 OPENAI_BASE_URL=https://api.groq.com/openai/v1
 OPENAI_API_KEY=gsk_...
 
-# Ollama locale puro
+# Ollama local
 OPENAI_BASE_URL=http://localhost:11434/v1
 OPENAI_API_KEY=ollama
 ```
 
-## Variabili d'ambiente
-
-| Variabile | Default | Descrizione |
-|---|---|---|
-| `OPENAI_BASE_URL` | `http://localhost:3001/v1` | Endpoint LLM (OpenAI-compatible) |
-| `OPENAI_API_KEY` | — | API key provider |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint Ollama |
-| `NEO4J_PASSWORD` | `changeme` | ⚠️ Cambiare prima di usare |
-| `GITHUB_TOKEN` | — | GitHub PAT scope `repo` |
-| `GRAPHITI_LLM_MODEL` | `auto` | Modello per entity extraction |
-| `GRAPHITI_EMBED_MODEL` | `nomic-embed-text` | Modello embedding locale |
-| `GRAPHITI_GROUP_ID` | `agents` | Namespace memoria (un valore per progetto) |
-
-## Comandi Makefile
+## Makefile commands
 
 ```bash
-make up          # avvia stack Docker (neo4j + memory)
-make down        # ferma stack
-make bootstrap   # seed knowledge graph dal codebase (prima volta)
-make models      # pull modelli Ollama
-make opencode    # lancia OpenCode
-make logs        # segui tutti i log
-make clean       # ferma + distrugge volumi (reset completo)
+make up          # start Docker stack (neo4j + memory)
+make down        # stop stack
+make bootstrap   # seed knowledge graph from codebase (first run)
+make models      # pull Ollama models
+make opencode    # launch OpenCode
+make logs        # follow all logs
+make clean       # stop + destroy volumes (full reset)
 ```
 
-## Sviluppo e test
+## Debugging
 
 ```bash
-# Installa dipendenze dev
-pip install -e ".[dev]" httpx
-
-# Esegui test (zero dipendenze esterne, tutto mockato)
-pytest tests/test_memory_service.py -v
-
-# Lint
-ruff check memory/ tests/test_memory_service.py
-```
-
-La CI gira automaticamente su ogni push e PR — vedi badge sopra.
-
-## Debug
-
-```bash
-# Log container
+# Container logs
 make logs
 
-# Health singoli servizi
-curl http://localhost:8002/health
-
-# Neo4j Browser (graph visuale)
+# Neo4j Browser (visual graph)
 open http://localhost:7474
-# login: neo4j / <NEO4J_PASSWORD da .env>
+# login: neo4j / <NEO4J_PASSWORD from .env>
 
-# Reset completo memoria
+# Full memory reset
 make clean && make up && make bootstrap
 ```
 
-## Lavorare su repo diverse
+## Working across repositories
 
-Lo stack Docker (neo4j + memory) è condiviso. OpenCode vede solo la cartella
-in cui viene lanciato. Per isolare la memoria per progetto:
+The Docker stack (neo4j + memory) is shared. OpenCode only sees the directory
+it is launched from. To isolate memory by project:
 
 ```bash
-# In .env del progetto B
-GRAPHITI_GROUP_ID=progetto-b
-# poi riavvia: make down && make up
+# In the project's .env
+GRAPHITI_GROUP_ID=project-b
+# then: make down && make up
 ```
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENAI_BASE_URL` | `http://localhost:3001/v1` | LLM endpoint (OpenAI-compatible) |
+| `OPENAI_API_KEY` | — | LLM API key |
+| `FREELLM_BASE_URL` | `http://host.docker.internal:3001/v1` | LLM endpoint inside Docker |
+| `FREELLM_API_KEY` | falls back to `OPENAI_API_KEY` | API key for the Docker LLM |
+| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama endpoint (embeddings + optional LLM) |
+| `NEO4J_PASSWORD` | `changeme` | ⚠️ Change before first use |
+| `NEO4J_URI` | `bolt://neo4j:7687` | Neo4j connection URI |
+| `NEO4J_USER` | `neo4j` | Neo4j username |
+| `GITHUB_TOKEN` | — | GitHub PAT with scope `repo` |
+| `GRAPHITI_LLM_MODEL` | `auto` | Model for entity extraction |
+| `GRAPHITI_EMBED_PROVIDER` | `ollama` | Embedding provider |
+| `GRAPHITI_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
+| `GRAPHITI_EMBED_DIM` | `768` | Embedding dimension |
+| `GRAPHITI_EMBED_BASE_URL` | set automatically | Override embed endpoint |
+| `GRAPHITI_EMBED_API_KEY` | set automatically | Override embed API key |
+| `GRAPHITI_GROUP_ID` | `agents` | Memory namespace (one per project) |

@@ -14,11 +14,11 @@ import traceback
 from datetime import UTC, datetime
 
 from graphiti_core import Graphiti
+from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.nodes import EpisodeType
 from mcp.server.fastmcp import FastMCP
-from openai import AsyncOpenAI
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("memory")
@@ -29,45 +29,24 @@ NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "changeme")
 
 FREELLM_BASE = os.getenv("FREELLM_BASE_URL", "http://host.docker.internal:3001/v1")
-FREELLM_KEY = os.getenv("FREELLM_API_KEY", os.getenv("OPENAI_API_KEY", "freellm"))
+FREELLM_KEY = os.getenv("FREELLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "freellm"
 LLM_MODEL = os.getenv("GRAPHITI_LLM_MODEL", "auto")
 
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+OLLAMA_BASE = OLLAMA_BASE.rstrip("/").removesuffix("/v1")
 EMBED_PROVIDER = os.getenv("GRAPHITI_EMBED_PROVIDER", "ollama")
-_OLLAMA_OPENAI_BASE = OLLAMA_BASE.rstrip("/") + "/v1"
-EMBED_BASE_URL = os.getenv(
-    "GRAPHITI_EMBED_BASE_URL",
-    _OLLAMA_OPENAI_BASE if EMBED_PROVIDER == "ollama" else "https://api.openai.com/v1",
+_OLLAMA_OPENAI_BASE = OLLAMA_BASE + "/v1"
+EMBED_BASE_URL = os.getenv("GRAPHITI_EMBED_BASE_URL") or (
+    _OLLAMA_OPENAI_BASE if EMBED_PROVIDER == "ollama" else "https://api.openai.com/v1"
 )
-EMBED_API_KEY = os.getenv(
-    "GRAPHITI_EMBED_API_KEY",
-    "ollama" if EMBED_PROVIDER == "ollama" else os.getenv("OPENAI_API_KEY", ""),
+EMBED_API_KEY = os.getenv("GRAPHITI_EMBED_API_KEY") or (
+    "ollama" if EMBED_PROVIDER == "ollama" else os.getenv("OPENAI_API_KEY", "")
 )
 _DEFAULT_MODEL = "nomic-embed-text" if EMBED_PROVIDER == "ollama" else "text-embedding-3-small"
 _DEFAULT_DIM = "768" if EMBED_PROVIDER == "ollama" else "1536"
 EMBED_MODEL = os.getenv("GRAPHITI_EMBED_MODEL", _DEFAULT_MODEL)
 EMBED_DIM = int(os.getenv("GRAPHITI_EMBED_DIM", _DEFAULT_DIM))
 GROUP_ID = os.getenv("GRAPHITI_GROUP_ID", "agents")
-
-
-# ── Embedder proxy ────────────────────────────────────────────────────────────
-class _EmbedderProxy:
-    def __init__(self):
-        self._model = EMBED_MODEL
-        self._client = AsyncOpenAI(api_key=EMBED_API_KEY, base_url=EMBED_BASE_URL)
-        logger.info(
-            "Embedder: provider=%s model=%s base_url=%s dim=%d",
-            EMBED_PROVIDER, EMBED_MODEL, EMBED_BASE_URL, EMBED_DIM,
-        )
-
-    async def create(self, **kwargs):
-        kwargs["model"] = self._model
-        return await self._client.embeddings.create(**kwargs)
-
-
-class _PatchedOpenAIClient(OpenAIClient):
-    def get_embedder(self):
-        return _EmbedderProxy()
 
 
 # ── Index creation ────────────────────────────────────────────────────────────
@@ -94,11 +73,23 @@ async def get_graphiti() -> Graphiti:
             "Initializing Graphiti: LLM=%s @ %s  embed=%s/%s(%dd)  group_id=%s",
             LLM_MODEL, FREELLM_BASE, EMBED_PROVIDER, EMBED_MODEL, EMBED_DIM, GROUP_ID,
         )
-        llm = _PatchedOpenAIClient(config=LLMConfig(
+        llm = OpenAIClient(config=LLMConfig(
             model=LLM_MODEL, base_url=FREELLM_BASE, api_key=FREELLM_KEY,
         ))
-        g = Graphiti(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD, llm_client=llm)
-        await _build_indices(g.driver, EMBED_DIM)
+        embed_config = OpenAIEmbedderConfig(
+            embedding_model=EMBED_MODEL,
+            api_key=EMBED_API_KEY,
+            base_url=EMBED_BASE_URL,
+        )
+        embedder = OpenAIEmbedder(config=embed_config)
+        g = Graphiti(
+            uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD,
+            llm_client=llm, embedder=embedder,
+        )
+        try:
+            await _build_indices(g.driver, EMBED_DIM)
+        except Exception as e:
+            logger.warning("Index creation skipped (likely already exists): %s", e)
         _graphiti = g
     return _graphiti
 
