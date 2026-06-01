@@ -1,0 +1,19 @@
+{
+  "provider": "openai",
+  "model": "qwen2.5-coder:14b",
+  "providers": {
+    "openai": {
+      "apiKey": "freell",
+      "baseURL": "http://localhost:3001/v1"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "memory": {
+        "type": "sse",
+        "url": "http://localhost:8002/mcp"
+      }
+    }
+  },
+  "instructions": "Always start every task by calling memory_recall with the task description to retrieve relevant context. Follow the workflow in AGENTS.md: RECALL → PLAN → BRANCH → IMPLEMENT → TEST → PR → LOG. Never commit directly to main."
+}
