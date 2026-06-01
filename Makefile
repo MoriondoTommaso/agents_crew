@@ -18,7 +18,7 @@ build:
 logs:
 	docker compose logs -f
 
-# ── OpenCode agent ───────────────────────────────────────────────────────────────
+# ── OpenCode agent ────────────────────────────────────────────────────────────────
 opencode:
 	@if [ ! -f .env ]; then echo "ERROR: .env file not found. Copy .env.example to .env and fill in your keys."; exit 1; fi
 	@echo "Starting OpenCode (OPENAI_BASE_URL=$$(grep OPENAI_BASE_URL .env | cut -d= -f2)) ..."
@@ -27,7 +27,7 @@ opencode:
 		OPENAI_API_KEY=$${OPENAI_API_KEY} \
 		opencode
 
-# ── FreeLLMAPI server (runs on host, not in Docker) ────────────────────────────
+# ── FreeLLMAPI server (runs on host, not in Docker) ────────────────────────
 freellm:
 	@echo "Starting FreeLLMAPI server on :3001 ..."
 	@echo "Dashboard: http://localhost:5173"
@@ -38,34 +38,52 @@ freellm:
 	fi
 	cd ../freellmapi && npm run dev
 
-# ── Memory bootstrap (run once after first make up) ────────────────────────────
+# ── Memory bootstrap (run once after first make up) ────────────────────────
 bootstrap:
-	@echo "Pulling Ollama embedder model ..."
-	ollama pull nomic-embed-text
+	@EMBED_PROVIDER=$$(grep -v '^#' .env 2>/dev/null | grep GRAPHITI_EMBED_PROVIDER | cut -d= -f2); \
+		EMBED_PROVIDER=$${EMBED_PROVIDER:-ollama}; \
+		if [ "$$EMBED_PROVIDER" = "ollama" ]; then \
+			echo "Pulling Ollama embedder model ..."; \
+			ollama pull $$(grep -v '^#' .env 2>/dev/null | grep GRAPHITI_EMBED_MODEL | cut -d= -f2 || echo nomic-embed-text); \
+		else \
+			echo "Embed provider is '$$EMBED_PROVIDER' — skipping ollama pull."; \
+		fi
 	@echo "Seeding knowledge graph from codebase ..."
 	docker compose exec memory python bootstrap.py
 	@echo "Bootstrap complete."
 
-# ── Ollama model management ───────────────────────────────────────────────────────────
+# ── Ollama model management ─────────────────────────────────────────────────────────
 models:
-	@echo "Pulling Ollama embedder model ..."
-	ollama pull nomic-embed-text
-	@echo "Model ready."
+	@EMBED_PROVIDER=$$(grep -v '^#' .env 2>/dev/null | grep GRAPHITI_EMBED_PROVIDER | cut -d= -f2); \
+		EMBED_PROVIDER=$${EMBED_PROVIDER:-ollama}; \
+		if [ "$$EMBED_PROVIDER" = "ollama" ]; then \
+			echo "Pulling Ollama embedder model ..."; \
+			ollama pull $$(grep -v '^#' .env 2>/dev/null | grep GRAPHITI_EMBED_MODEL | cut -d= -f2 || echo nomic-embed-text); \
+			echo "Model ready."; \
+		else \
+			echo "Embed provider is '$$EMBED_PROVIDER' — no Ollama model needed."; \
+		fi
 
-# ── Pre-flight dependency check ─────────────────────────────────────────────────────────
+# ── Pre-flight dependency check ─────────────────────────────────────────────────────
 check-deps:
 	@if [ ! -f .env ]; then echo "ERROR: .env file not found. Copy .env.example to .env and fill in your keys."; exit 1; fi
 	@echo "Checking host dependencies ..."
 	@command -v opencode > /dev/null 2>&1 \
 		&& echo "  ✓ OpenCode installed" \
 		|| echo "  ⚠  OpenCode not found — install: brew install opencode-ai/tap/opencode"
-	@OLLAMA_URL=$${OLLAMA_BASE_URL:-http://localhost:11434}; \
-		curl -sf "$$OLLAMA_URL" > /dev/null 2>&1 \
-		&& echo "  ✓ Ollama reachable at $$OLLAMA_URL" \
-		|| (echo "  ✗ Ollama NOT reachable — run: ollama serve" && exit 1)
+	@EMBED_PROVIDER=$$(grep -v '^#' .env 2>/dev/null | grep GRAPHITI_EMBED_PROVIDER | cut -d= -f2); \
+		EMBED_PROVIDER=$${EMBED_PROVIDER:-ollama}; \
+		OLLAMA_URL=$${OLLAMA_BASE_URL:-http://localhost:11434}; \
+		if [ "$$EMBED_PROVIDER" = "ollama" ]; then \
+			curl -sf "$$OLLAMA_URL" > /dev/null 2>&1 \
+				&& echo "  ✓ Ollama reachable at $$OLLAMA_URL" \
+				|| (echo "  ✗ Ollama NOT reachable — run: ollama serve" && exit 1); \
+		else \
+			echo "  ✓ Embed provider is '$$EMBED_PROVIDER' — Ollama not required."; \
+		fi
 	@echo "  ✓ All deps OK."
 
-# ── Cleanup ─────────────────────────────────────────────────────────────────────────────────
+# ── Cleanup ────────────────────────────────────────────────────────────────────────────────────
 clean:
 	docker compose down -v --remove-orphans
 	docker image prune -f
