@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memory": {
+      "type": "remote",
+      "url": "http://localhost:8002/sse",
+      "enabled": true
+    }
+  }
+}
