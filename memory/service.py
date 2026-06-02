@@ -20,6 +20,30 @@ from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.nodes import EpisodeType
 from mcp.server.fastmcp import FastMCP
 
+# ── Monkey-patch: auto-initialize sessions that skip the initialize handshake ──
+import mcp.server.session as _mcp_session_mod
+import mcp.types as _mcp_types
+from mcp.server.session import InitializationState as _InitState
+
+_orig_recv = _mcp_session_mod.ServerSession._received_request
+
+
+async def _autoinit_recv(self, responder):
+    if self._initialization_state == _InitState.NotInitialized:
+        logger.info("auto-init: received request on uninitialized session")
+        self._initialization_state = _InitState.Initializing
+        self._client_params = _mcp_types.InitializeRequestParams(
+            protocolVersion="2024-11-05",
+            capabilities=_mcp_types.ClientCapabilities(),
+            clientInfo=_mcp_types.Implementation(name="auto-init", version="1.0"),
+        )
+        self._initialization_state = _InitState.Initialized
+        logger.info("auto-init: session initialized")
+    return await _orig_recv(self, responder)
+
+
+_mcp_session_mod.ServerSession._received_request = _autoinit_recv
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("memory")
 
