@@ -1,10 +1,10 @@
-.PHONY: up down build logs opencode freellm bootstrap check-deps clean models
+.PHONY: up down build logs opencode freellm bootstrap switch-project check-deps clean models
 
 # ── Docker stack ──────────────────────────────────────────────────────────────────
 up: check-deps
 	docker compose up --build -d
 	@echo ""
-	@echo "Stack is up:  Memory :8002  |  Neo4j :7474"
+	@echo "Stack is up:  Memory :8002  |  Neo4j :7474  |  LiteLLM :4000"
 	@echo "Run 'make bootstrap' to seed the knowledge graph (first time only)."
 	@echo "  make bootstrap              → seeds agents_crew itself"
 	@echo "  make bootstrap TARGET_DIR=~  → seeds another project"
@@ -42,6 +42,17 @@ TARGET_DIR ?= $(CURDIR)
 bootstrap:
 	@bash "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))bootstrap.sh" \
 	  "$(TARGET_DIR)" "$(GROUP_ID)"
+
+# ── Multi-project memory isolation ──────────────────────────────────────────────────────
+switch-project: ## Switch memory context to a different project
+	@echo "Usage: make switch-project PROJECT=/path/to/project [GROUP=name]"
+	@if [ -z "$(PROJECT)" ]; then echo "ERROR: PROJECT is required"; exit 1; fi
+	@GROUP_NAME=$${GROUP:-$$(basename $(PROJECT))}; \
+	 sed -i.bak "s|^GRAPHITI_GROUP_ID=.*|GRAPHITI_GROUP_ID=$$GROUP_NAME|" .env && \
+	 echo "Switched GRAPHITI_GROUP_ID to: $$GROUP_NAME"; \
+	 docker compose restart memory; \
+	 echo "Memory container restarted with new group_id"
+	@$(MAKE) bootstrap TARGET=$(PROJECT)
 
 # ── Ollama model management ─────────────────────────────────────────────────────────
 models:

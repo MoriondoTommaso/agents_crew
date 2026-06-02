@@ -35,6 +35,10 @@ Embeddings and entity extraction run entirely on **Ollama** — zero external AP
 │       └── memory_task_log                           │
 │            │                                        │
 │            └──► Graphiti ──► Neo4j :7687            │
+│                 └──► litellm :4000 ──► Ollama       │
+│                                                     │
+│  litellm container :4000                            │
+│  └── proxy ──► Ollama :11434                        │
 │                                                     │
 └─────────────────────────────────────────────────────┘
 ```
@@ -115,6 +119,12 @@ Memory is **namespaced per project** via `GRAPHITI_GROUP_ID`. Bootstrapping
 - [Ollama](https://ollama.com/) running on the host
 - [OpenCode CLI](https://opencode.ai) installed
 - An OpenAI-compatible LLM endpoint (FreeLLMAPI, OpenRouter, Groq, or local Ollama)
+
+### LiteLLM proxy (required)
+
+LiteLLM bridges Graphiti's internal `gpt-4.1-nano` calls to your local
+Ollama model. It starts automatically with `make up` / `docker compose up -d`.
+Config: `litellm-config.yaml` in the repo root.
 
 ### 1. Clone and configure
 
@@ -232,6 +242,20 @@ automatically across sessions.
 
 ---
 
+### Switching projects
+
+To bootstrap a different project and isolate its memory:
+
+```bash
+make switch-project PROJECT=~/path/to/other-project
+# or with a custom namespace:
+make switch-project PROJECT=~/path/to/other-project GROUP=my-namespace
+```
+
+Each project gets its own isolated memory namespace in Neo4j.
+
+---
+
 ## Daily workflow (once setup is done)
 
 ```bash
@@ -259,6 +283,8 @@ make build                           # rebuild images without cache
 make logs                            # follow container logs
 make bootstrap                       # bootstrap agents_crew itself
 make bootstrap TARGET_DIR=~/proj     # bootstrap any other project
+make switch-project PROJECT=~/proj   # switch memory context + bootstrap a project
+make switch-project PROJECT=~/proj GROUP=my-ns  # custom namespace
 make bootstrap TARGET_DIR=~/proj GROUP_ID=my-id  # custom namespace
 make models                          # pull Ollama models
 make opencode                        # launch OpenCode (injects .env)

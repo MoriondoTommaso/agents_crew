@@ -1,0 +1,18 @@
+model_list:
+  - model_name: "gpt-4.1-nano"
+    litellm_params:
+      model: "ollama/qwen2.5-coder:14b"
+      api_base: "http://host.docker.internal:11434"
+
+  - model_name: "qwen2.5-coder:14b"
+    litellm_params:
+      model: "ollama/qwen2.5-coder:14b"
+      api_base: "http://host.docker.internal:11434"
+
+  - model_name: "auto"
+    litellm_params:
+      model: "ollama/qwen2.5-coder:14b"
+      api_base: "http://host.docker.internal:11434"
+
+litellm_settings:
+  drop_params: true
