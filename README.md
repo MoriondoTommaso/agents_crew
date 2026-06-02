@@ -89,7 +89,7 @@ make opencode
 ```
 
 OpenCode reads the MCP server config from `~/.config/opencode/opencode.jsonc`
-(or a local `opencode.json` per project).
+(global) or a local `opencode.json` per project.
 
 Example global config (`~/.config/opencode/opencode.jsonc`):
 
@@ -105,6 +105,14 @@ Example global config (`~/.config/opencode/opencode.jsonc`):
   }
 }
 ```
+
+For per-project config, copy `opencode.json.example` to your project root:
+
+```bash
+cp opencode.json.example ~/code_base/your-project/opencode.json
+```
+
+See [Usage with a new project](#usage-with-a-new-project) below.
 
 ## Agentic workflow
 
@@ -178,15 +186,74 @@ open http://localhost:7474
 make clean && make up && make bootstrap
 ```
 
-## Working across repositories
+## Usage with a new project
 
-The Docker stack (neo4j + memory) is shared. OpenCode only sees the directory
-it is launched from. To isolate memory by project:
+You can bootstrap **any project on your machine** into the shared knowledge
+graph with a single command. No need to clone agents_crew into the project,
+no Docker knowledge required.
+
+### 1. Start the stack (once)
 
 ```bash
-# In the project's .env
-GRAPHITI_GROUP_ID=project-b
-# then: make down && make up
+cd ~/code_base/agents
+docker compose up -d
+# → neo4j :7474  |  memory :8002
+```
+
+### 2. Bootstrap your project
+
+```bash
+~/code_base/agents/bootstrap.sh ~/code_base/YOUR_PROJECT
+#                        group-id = YOUR_PROJECT (inferred from dir name)
+```
+
+This mounts your project directory into the memory container, scans all source
+files, and ingests them as episodes into the `YOUR_PROJECT` namespace.
+
+To verify without writing to Neo4j:
+
+```bash
+~/code_base/agents/bootstrap.sh ~/code_base/YOUR_PROJECT --dry-run
+```
+
+### 3. Connect OpenCode to the memory server
+
+Copy the MCP config to your project root:
+
+```bash
+cp ~/code_base/agents/opencode.json.example ~/code_base/YOUR_PROJECT/opencode.json
+```
+
+This tells OpenCode to connect to `http://localhost:8002/sse` for memory tools.
+
+### 4. Launch OpenCode from your project
+
+```bash
+cd ~/code_base/YOUR_PROJECT
+opencode
+```
+
+That's it. Every session will now have `memory_recall`, `memory_add_episode`,
+`memory_get_context`, and `memory_task_log` available.
+
+### Per-project isolation
+
+Memory is namespaced by `GRAPHITI_GROUP_ID`. Each project gets its own
+namespace (equals the directory basename by default). Queries from one project
+will only see episodes tagged with that project's group ID.
+
+```bash
+# Bootstrap two projects — each gets separate memory:
+~/code_base/agents/bootstrap.sh ~/code_base/project-alpha   # group = project-alpha
+~/code_base/agents/bootstrap.sh ~/code_base/project-beta    # group = project-beta
+```
+
+### Via Make (from agents_crew dir)
+
+```bash
+make bootstrap                       # bootstraps agents_crew itself
+make bootstrap TARGET_DIR=~/other    # bootstraps another project
+make bootstrap TARGET_DIR=~/other GROUP_ID=custom  # custom namespace
 ```
 
 ## Environment variables
