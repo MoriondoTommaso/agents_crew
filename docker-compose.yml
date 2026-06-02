@@ -1,14 +1,15 @@
 # docker-compose.yml
 # Coding agent stack
 #
-#   neo4j   — Graph database for Graphiti memory (ports 7474 7687)
-#   memory  — Graphiti knowledge-graph MCP service (port 8002)
+#   neo4j    — Graph database for Graphiti memory (ports 7474 7687)
+#   memory   — Graphiti knowledge-graph MCP service (port 8002)
+#   litellm  — OpenAI-compatible proxy bridging gpt-4.1-nano to Ollama (port 4000)
 #
-# LLM routing is handled by FreeLLMAPI running on the HOST (not Docker).
+# LLM routing is handled by the LiteLLM proxy (Docker) or FreeLLMAPI (HOST).
 # OpenCode CLI runs on the HOST and speaks OpenAI format to the LLM endpoint.
 #
 # Usage:
-#   make up        → start neo4j + memory
+#   make up        → start neo4j + memory + litellm
 #   make bootstrap → seed knowledge graph (run once)
 #   make opencode  → launch OpenCode agent
 #   make freellm   → start FreeLLMAPI server (if using FreeLLMAPI)
@@ -94,6 +95,19 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── 3. LiteLLM proxy (bridges gpt-4.1-nano → Ollama) ──────────────────────
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   neo4j-data:
