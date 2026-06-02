@@ -19,3 +19,5 @@ Thumbs.db
 *.log
 
 .ruff_cache/
+
+opencode.json  
