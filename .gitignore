@@ -21,3 +21,4 @@ Thumbs.db
 .ruff_cache/
 
 opencode.json  
+.env.bak

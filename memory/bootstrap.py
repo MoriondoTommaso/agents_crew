@@ -22,6 +22,7 @@ Docker image and a running Neo4j container):
 
 import argparse
 import asyncio
+import fnmatch
 import logging
 import os
 import sys
@@ -39,6 +40,8 @@ SKIP_DIRS = {
     "target", "bin", "obj",
     ".idea", ".vscode", ".DS_Store",
     "coverage", ".coverage",
+    "storage", "fixtures", "migrations", "generated",
+    "proto", "snapshots", "__fixtures__",
 }
 
 SKIP_FILES = {
@@ -46,6 +49,26 @@ SKIP_FILES = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     ".DS_Store", "Thumbs.db",
 }
+
+SKIP_FILE_PATTERNS = {
+    "*_metadata.json",
+    "*.min.js",
+    "*.min.css",
+    "*.generated.*",
+    "*.pb.go",
+    "*.pb.ts",
+    "*_pb2.py",
+    "Cargo.lock",
+    "poetry.lock",
+    "composer.lock",
+}
+
+MAX_FILE_BYTES = 100_000
+MIN_FILE_BYTES = 20
+
+NO_EXT_NAMES = {"Makefile", "Dockerfile"}
+
+_skip_log: list[tuple[str, str, str]] = []
 
 CODE_EXTS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
@@ -56,10 +79,35 @@ CODE_EXTS = {
 DOC_EXTS = {".md", ".rst", ".txt", ".mdx"}
 CONFIG_EXTS = {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
 WEB_EXTS = {".html", ".css", ".scss", ".sass", ".less"}
-DEVOPS_EXTS = {".dockerfile", ".tf", ".sql"}
+DEVOPS_EXTS = {".dockerfile", ".tf", ".sql", ".sh"}
 ALL_EXTS = CODE_EXTS | DOC_EXTS | CONFIG_EXTS | WEB_EXTS | DEVOPS_EXTS
 
 MAX_CONTENT_CHARS = 800
+
+
+def _load_ignore_patterns(root: Path) -> list[str]:
+    ignore_file = root / ".bootstrapignore"
+    patterns: list[str] = []
+    if not ignore_file.exists():
+        return patterns
+    for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        patterns.append(line)
+    logger.info("Loaded %d patterns from .bootstrapignore", len(patterns))
+    return patterns
+
+
+def _matches_ignore(rel: Path, patterns: list[str]) -> bool:
+    rel_str = str(rel)
+    for pat in patterns:
+        if fnmatch.fnmatch(rel_str, pat):
+            return True
+        for part in rel.parts:
+            if fnmatch.fnmatch(part, pat):
+                return True
+    return False
 
 
 def _count_tokens(text: str) -> int:
@@ -109,29 +157,56 @@ def _file_summary(path: Path) -> str | None:
 
 
 def _scan_directory(root: Path) -> list[Path]:
-    files = []
+    global _skip_log
+    _skip_log = []
+    ignore_patterns = _load_ignore_patterns(root)
+    files: list[Path] = []
     for entry in root.rglob("*"):
         rel = entry.relative_to(root)
         parts = set(rel.parts[:-1])
-        if parts & SKIP_DIRS:
-            continue
         if not entry.is_file():
             continue
+        dir_match = parts & SKIP_DIRS
+        if dir_match:
+            _skip_log.append(("skip_dir", str(rel), f"dir in SKIP_DIRS"))
+            continue
         if entry.name in SKIP_FILES:
+            _skip_log.append(("skip_file", str(rel), f"name in SKIP_FILES"))
             continue
         ext = entry.suffix.lower()
-        if ext not in ALL_EXTS:
+        if ext not in ALL_EXTS and entry.name not in NO_EXT_NAMES:
+            _skip_log.append(("ext", str(rel), f"'{ext}' not in ALL_EXTS"))
             continue
+        try:
+            sz = entry.stat().st_size
+        except OSError:
+            _skip_log.append(("unreadable", str(rel), ""))
+            continue
+        if sz < MIN_FILE_BYTES:
+            _skip_log.append(("too_small", str(rel), f"{sz}B"))
+            continue
+        if sz > MAX_FILE_BYTES:
+            _skip_log.append(("too_large", str(rel), f"{sz}B"))
+            continue
+        matched = False
+        for pat in SKIP_FILE_PATTERNS:
+            if fnmatch.fnmatch(entry.name, pat):
+                _skip_log.append(("pattern", str(rel), f"matches {pat}"))
+                matched = True
+                break
+        if matched:
+            continue
+        if _matches_ignore(rel, ignore_patterns):
+            _skip_log.append(("ignore", str(rel), ""))
+            continue
+        _skip_log.append(("ok", str(rel), ""))
         files.append(entry)
     files.sort(key=lambda p: (len(p.parents), p.name))
     return files
 
 
-from graphiti_core.nodes import EpisodeType
-from service import get_graphiti
-
-
 async def main():
+    import argparse
     parser = argparse.ArgumentParser(description="Seed knowledge graph from a project directory.")
     parser.add_argument("--dir", default="/workspace", help="Project directory to scan (default: /workspace)")
     parser.add_argument("--group-id", default=None, help="Memory namespace (default: GRAPHITI_GROUP_ID env or dir name)")
@@ -154,8 +229,16 @@ async def main():
     if dry_run:
         for f in files:
             rel = f.relative_to(project_root)
-            print(f"  {rel}")
+            print(f"  [OK]          {rel}")
+        all_skipped = [(r, rel, d) for r, rel, d in _skip_log if r != "ok"]
+        for reason, rel, detail in sorted(all_skipped, key=lambda x: x[1]):
+            detail_str = f" ({detail})" if detail else ""
+            print(f"  [SKIP:{reason}]  {rel}{detail_str}")
+        print(f"\nTotal: {len(files)} files to ingest, {len(all_skipped)} skipped")
         return
+
+    from graphiti_core.nodes import EpisodeType
+    from service import get_graphiti
 
     logger.info("Connecting to Graphiti ...")
     g = await get_graphiti()
