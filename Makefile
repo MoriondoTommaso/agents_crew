@@ -6,6 +6,8 @@ up: check-deps
 	@echo ""
 	@echo "Stack is up:  Memory :8002  |  Neo4j :7474"
 	@echo "Run 'make bootstrap' to seed the knowledge graph (first time only)."
+	@echo "  make bootstrap              → seeds agents_crew itself"
+	@echo "  make bootstrap TARGET_DIR=~  → seeds another project"
 	@echo "Run 'make opencode'  to start the OpenCode agent."
 	@echo "Run 'make freellm'   to start the FreeLLMAPI server (if not running)."
 
@@ -36,8 +38,10 @@ freellm:
 	cd ../freellmapi && npm run dev
 
 # ── Memory bootstrap (seed the knowledge graph from any project) ──────────
+TARGET_DIR ?= $(CURDIR)
 bootstrap:
-	@bash bootstrap.sh "$(CURDIR)" "$(GROUP_ID)"
+	@bash "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))bootstrap.sh" \
+	  "$(TARGET_DIR)" "$(GROUP_ID)"
 
 # ── Ollama model management ─────────────────────────────────────────────────────────
 models:
